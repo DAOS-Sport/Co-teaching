@@ -28,26 +28,21 @@ function getWeekdayName(date: Date): string {
 function useLineLoginParams() {
   const [params, setParams] = useState<{
     lineLogin?: string;
-    userId?: string;
     token?: string;
-    coachToken?: string;
     error?: string;
   }>({});
 
   useEffect(() => {
     const url = new URL(window.location.href);
-    const lineLogin = url.searchParams.get("lineLogin");
-    const userId = url.searchParams.get("userId");
-    const token = url.searchParams.get("token");
-    const coachToken = url.searchParams.get("coachToken");
+    const fragment = new URLSearchParams(url.hash.replace(/^#/, ""));
+    const lineLogin = fragment.get("lineLogin") ?? url.searchParams.get("lineLogin");
+    const token = fragment.get("token") ?? url.searchParams.get("token");
     const error = url.searchParams.get("error");
 
     if (lineLogin || error) {
       setParams({
         lineLogin: lineLogin || undefined,
-        userId: userId || undefined,
         token: token || undefined,
-        coachToken: coachToken || undefined,
         error: error || undefined,
       });
       window.history.replaceState({}, "", "/coach-portal");
@@ -69,6 +64,7 @@ function persistCoachLogin(user: CoachUser & { coachToken?: string }): void {
 export default function CoachPortal() {
   const [coachUser, setCoachUser] = useState<CoachUser | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [exchangeLoading, setExchangeLoading] = useState(false);
   const [currentWeek, setCurrentWeek] = useState(() =>
     startOfWeek(new Date(), { weekStartsOn: 1 })
   );
@@ -83,13 +79,34 @@ export default function CoachPortal() {
   }, []);
 
   useEffect(() => {
-    if (lineParams.lineLogin === "existing" && lineParams.userId) {
-      setSessionId(lineParams.userId);
-      sessionStorage.setItem("coach_portal_id", lineParams.userId);
-      if (lineParams.coachToken) {
-        sessionStorage.setItem("coach_portal_token", lineParams.coachToken);
-      }
-    }
+    if (lineParams.lineLogin !== "existing" || !lineParams.token) return;
+    let cancelled = false;
+    setExchangeLoading(true);
+    fetch("/api/auth/line/exchange", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: lineParams.token }),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error("登入交換碼已過期，請重新登入");
+        return res.json() as Promise<CoachUser & { coachToken: string }>;
+      })
+      .then((user) => {
+        if (cancelled) return;
+        persistCoachLogin(user);
+        setSessionId(user.id);
+        setCoachUser(user);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          sessionStorage.removeItem("coach_portal_id");
+          sessionStorage.removeItem("coach_portal_token");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setExchangeLoading(false);
+      });
+    return () => { cancelled = true; };
   }, [lineParams]);
 
   const { data: currentUser, isLoading: userLoading } = useQuery<CoachUser>({
@@ -126,7 +143,7 @@ export default function CoachPortal() {
     setCoachUser(null);
   };
 
-  if (userLoading && sessionId) {
+  if (exchangeLoading || (userLoading && sessionId)) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center">
@@ -194,7 +211,11 @@ function LineLinkNameForm({
   const { data: tokenInfoRaw } = useQuery<{ lineName: string; linePicture: string }>({
     queryKey: ["/api/auth/line/token-info", lineToken],
     queryFn: async () => {
-      const res = await fetch(`/api/auth/line/token-info/${lineToken}`);
+      const res = await fetch("/api/auth/line/token-info", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: lineToken }),
+      });
       if (!res.ok) throw new Error("Token expired");
       return res.json();
     },
@@ -417,7 +438,7 @@ function ApprovedDashboard({
     queryKey: ["/api/coach-portal/my-schedule", coachName, startDate, endDate],
     queryFn: async () => {
       const res = await fetch(
-        `/api/coach-portal/my-schedule?coachName=${encodeURIComponent(coachName)}&startDate=${startDate}&endDate=${endDate}`
+        `/api/coach-portal/my-schedule?coachName=${encodeURIComponent(coachName)}&startDate=${startDate}&endDate=${endDate}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } }
       );
       if (!res.ok) throw new Error("Failed");
       return res.json();
@@ -453,7 +474,7 @@ function ApprovedDashboard({
       const venueIds = todaySchedules.map(s => s.venueId);
       if (!venueIds.length) return [];
       const res = await fetch(
-        `/api/coach-portal/colleagues?coachName=${encodeURIComponent(coachName)}&date=${today}&venueIds=${venueIds.join(",")}`
+        `/api/coach-portal/colleagues?coachName=${encodeURIComponent(coachName)}&date=${today}&venueIds=${venueIds.join(",")}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } }
       );
       if (!res.ok) return [];
       return res.json();
@@ -478,7 +499,7 @@ function ApprovedDashboard({
     queryKey: ["/api/coach-portal/availability", coachName, format(availWeek, "yyyy-MM-dd")],
     queryFn: async () => {
       const res = await fetch(
-        `/api/coach-portal/availability?coachName=${encodeURIComponent(coachName)}&weekStart=${format(availWeek, "yyyy-MM-dd")}`
+        `/api/coach-portal/availability?coachName=${encodeURIComponent(coachName)}&weekStart=${format(availWeek, "yyyy-MM-dd")}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } }
       );
       if (!res.ok) return [];
       return res.json();
@@ -489,7 +510,7 @@ function ApprovedDashboard({
     queryKey: ["/api/coach-portal/assigned-slots", coachName, availStartDate, availEndDate],
     queryFn: async () => {
       const res = await fetch(
-        `/api/coach-portal/assigned-slots?coachName=${encodeURIComponent(coachName)}&startDate=${availStartDate}&endDate=${availEndDate}`
+        `/api/coach-portal/assigned-slots?coachName=${encodeURIComponent(coachName)}&startDate=${availStartDate}&endDate=${availEndDate}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } }
       );
       if (!res.ok) return [];
       return res.json();
@@ -502,16 +523,6 @@ function ApprovedDashboard({
     return set;
   }, [assignedSlots]);
 
-  const { data: venuePreferences = [] } = useQuery<string[]>({
-    queryKey: ["/api/coach-portal/venue-preferences", coachName],
-    queryFn: async () => {
-      const res = await fetch(`/api/coach-portal/venue-preferences?coachName=${encodeURIComponent(coachName)}`);
-      if (!res.ok) return [];
-      return res.json();
-    },
-    enabled: !!coachName,
-  });
-
   const scheduleLastModified = useMemo(() => {
     if (!mySchedules.length) return null;
     const maxTime = Math.max(...mySchedules.map(s => s.updatedAt ? new Date(s.updatedAt).getTime() : 0));
@@ -521,7 +532,7 @@ function ApprovedDashboard({
   const { data: fillStatus } = useQuery<{ hasAvailability: boolean; hasVenuePrefs: boolean }>({
     queryKey: ["/api/coach-portal/fill-status", coachName],
     queryFn: async () => {
-      const res = await fetch(`/api/coach-portal/fill-status?coachName=${encodeURIComponent(coachName)}`);
+      const res = await fetch(`/api/coach-portal/fill-status?coachName=${encodeURIComponent(coachName)}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } });
       if (!res.ok) return { hasAvailability: false, hasVenuePrefs: false };
       return res.json();
     },
@@ -530,47 +541,6 @@ function ApprovedDashboard({
 
   const { toast } = useToast();
 
-  const [localVenuePrefs, setLocalVenuePrefs] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    setLocalVenuePrefs(new Set(venuePreferences));
-  }, [venuePreferences]);
-
-  const venuePrefDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const saveVenuePreferences = useCallback((newSet: Set<string>) => {
-    if (venuePrefDebounceRef.current) clearTimeout(venuePrefDebounceRef.current);
-    venuePrefDebounceRef.current = setTimeout(async () => {
-      try {
-        const coachToken = sessionStorage.getItem("coach_portal_token") || "";
-        const res = await fetch("/api/coach-portal/venue-preferences", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(coachToken ? { "x-coach-token": coachToken } : {}),
-          },
-          body: JSON.stringify({ coachName, venueNames: Array.from(newSet) }),
-        });
-        if (!res.ok) throw new Error("Failed");
-        queryClient.invalidateQueries({ queryKey: ["/api/coach-portal/venue-preferences", coachName] });
-      } catch {
-        toast({ title: "儲存失敗，請重試", variant: "destructive" });
-      }
-    }, 600);
-  }, [coachName, toast]);
-
-  const toggleVenuePreference = (venueName: string) => {
-    setLocalVenuePrefs(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(venueName)) {
-        newSet.delete(venueName);
-      } else {
-        newSet.add(venueName);
-      }
-      saveVenuePreferences(newSet);
-      return newSet;
-    });
-  };
   const [vacantVenueId, setVacantVenueId] = useState("");
   const [vacantWeek, setVacantWeek] = useState(() =>
     startOfWeek(new Date(), { weekStartsOn: 1 })
@@ -687,7 +657,7 @@ function ApprovedDashboard({
     return `https://www.google.com/calendar/render?action=TEMPLATE&text=${title}&dates=${dtStart}/${dtEnd}&ctz=Asia/Taipei&location=${location}&details=${details}`;
   };
 
-  const dayNames = ["一", "二", "三", "四", "五", "六", "日"];
+  const dayNames = ["一", "二", "三", "四", "五"];
   const periodLabels = ["第1節 08-09", "第2節 09-10", "第3節 10-11", "第4節 11-12", "第5節 13-14", "第6節 14-15", "第7節 15-16"];
 
   return (
@@ -986,47 +956,6 @@ function ApprovedDashboard({
           </CardContent>
         </Card>
 
-        {/* 場館偏好區塊 — 暫時隱藏，功能程式碼保留勿刪除 */}
-        {false && <Card id="venue-prefs-section">
-          <CardHeader className="py-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <MapPin className="h-4 w-4" />
-              可排課地點
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="py-2">
-            <p className="text-xs text-muted-foreground mb-3">請勾選您可以前往上課的場館</p>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {venues.map(venue => {
-                const isSelected = localVenuePrefs.has(venue.name);
-                return (
-                  <button
-                    key={venue.id}
-                    onClick={() => toggleVenuePreference(venue.name)}
-                    className={`flex items-center gap-2 p-2.5 rounded-lg border text-sm transition-colors text-left ${
-                      isSelected
-                        ? "bg-green-50 border-green-400 text-green-800"
-                        : "bg-gray-50 border-gray-200 hover:bg-gray-100 text-gray-600"
-                    }`}
-                  >
-                    <span className={`w-5 h-5 rounded border flex items-center justify-center text-xs ${
-                      isSelected ? "bg-green-500 border-green-600 text-white" : "border-gray-300"
-                    }`}>
-                      {isSelected ? "✓" : ""}
-                    </span>
-                    <span className="truncate">{venue.name}</span>
-                  </button>
-                );
-              })}
-            </div>
-            {localVenuePrefs.size > 0 && (
-              <div className="mt-2 text-xs text-muted-foreground">
-                已選 {localVenuePrefs.size} 個場館
-              </div>
-            )}
-          </CardContent>
-        </Card>}
-
         <Card id="availability-section">
           <CardHeader className="py-3">
             <div className="flex items-center justify-between">
@@ -1039,7 +968,7 @@ function ApprovedDashboard({
                   <ChevronLeft className="h-4 w-4" />
                 </Button>
                 <span className="text-sm font-medium min-w-32 text-center">
-                  {format(availWeekDays[0], "M/d", { locale: zhTW })} - {format(availWeekDays[6], "M/d", { locale: zhTW })}
+                  {format(availWeekDays[0], "M/d", { locale: zhTW })} - {format(availWeekDays[4], "M/d", { locale: zhTW })}
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => setAvailWeek(w => addWeeks(w, 1))}>
                   <ChevronRight className="h-4 w-4" />
@@ -1197,9 +1126,9 @@ const coachPortalHelp: HelpSection[] = [
     steps: [
       {
         title: "填寫可用時段",
-        desc: "滾動到「可用時段」區塊，在 7×7 格子中點擊您可以上課的時段，格子變綠色代表已標記可用。",
+        desc: "滾動到「可用時段」區塊，在週一至週五的格子中點擊您可以上課的時段，格子變綠色代表已標記可用。",
         sub: [
-          "橫軸為星期一到星期日",
+          "橫軸為星期一到星期五",
           "縱軸為第一節到第七節",
           "藍色格子（🔒）代表已排課，不可修改",
         ],
@@ -1208,16 +1137,6 @@ const coachPortalHelp: HelpSection[] = [
       {
         title: "確認已儲存",
         desc: "修改後系統會自動儲存，頁面上方「可用時段已填寫 ✓」標籤亮起代表儲存成功。",
-      },
-    ],
-  },
-  {
-    title: "場館偏好",
-    icon: "fa-map-marker-alt",
-    steps: [
-      {
-        title: "設定偏好場館",
-        desc: "在「可排課地點」區塊勾選您偏好教學的場館，系統自動排課時會優先安排於您偏好的場館。",
       },
     ],
   },

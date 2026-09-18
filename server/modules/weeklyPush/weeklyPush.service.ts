@@ -13,6 +13,7 @@
  * repository; the routes never touch either layer directly.
  */
 import { addDays, format, startOfWeek } from "date-fns";
+import { randomUUID } from "node:crypto";
 import { zhTW } from "date-fns/locale";
 import { storage } from "../../storage";
 import { env } from "../../config/env";
@@ -204,63 +205,50 @@ export async function enqueueWeeklyPush(
   const dryRun = params.dryRun === true;
   const triggerSource: WeeklyPushTriggerSource =
     params.triggerSource ?? "manual";
+  const destination = "coaches";
+  const idempotencyKey = `${dryRun ? "weekly-preview" : "weekly-send"}:${weekStartDate}:${destination}`;
 
-  const existing = await weeklyPushRepo.findActiveRunForWeek(
-    PUSH_TYPE,
-    weekStartDate,
-    weekEndDate,
-  );
-  if (existing && !dryRun) {
-    // Wet-run idempotency: refuse to schedule a second real run for the
-    // same week while one in {queued|running|success} already exists.
-    //
-    // Dry-runs are intentionally NOT deduped against this set — they
-    // cost nothing (no LINE messages sent), admins use them as repeated
-    // previews of the current roster, and forcing re-use would surface
-    // stale recipient lists / dryRun=false runs to the operator. This
-    // divergence from strict (pushType, week) idempotency is by design.
+  const existing = await weeklyPushRepo.getRunByIdempotencyKey(idempotencyKey);
+  if (existing) {
     return { run: existing, reused: true, recipientsCreated: 0 };
   }
 
-  const run = await weeklyPushRepo.createRun({
-    pushType: PUSH_TYPE,
-    weekStartDate,
-    weekEndDate,
-    triggerSource,
-    status: "queued",
-    dryRun,
-    totalCount: 0,
-  });
-
+  const runId = randomUUID();
   const built = await buildRecipientsForWeek(weekStartDate, weekEndDate);
-
   const recipientRows: InsertWeeklyPushRecipient[] = built.map((b) => ({
-    runId: run.id,
+    runId,
     recipientType: "coach",
     recipientId: b.recipientId,
     recipientName: b.recipientName,
     lineUserId: b.lineUserId,
     status: dryRun ? "skipped" : "pending",
-    payloadJson: b.payload,
+    deliveryKey: `${dryRun ? "weekly-preview" : "weekly"}:${weekStartDate}:${b.recipientId ?? b.lineUserId}`,
+    lineRetryKey: randomUUID(),
+    payloadJson: { ...b.payload, messageVersion: 1, capturedAt: new Date().toISOString() },
   }));
 
-  const created = await weeklyPushRepo.createRecipientsBulk(recipientRows);
+  const bundle = await weeklyPushRepo.createRunBundle({
+    id: runId,
+    pushType: PUSH_TYPE,
+    weekStartDate,
+    weekEndDate,
+    triggerSource,
+    destination,
+    idempotencyKey,
+    status: "queued",
+    dryRun,
+    totalCount: 0,
+  }, recipientRows, queues.weeklyPush);
 
-  await weeklyPushRepo.updateRun(run.id, {
-    totalCount: created.length,
-    skippedCount: dryRun ? created.length : 0,
-  });
-
-  // Enqueue the orchestrator job. The handler will branch on dryRun
-  // and either skip the LINE calls or fan out per-recipient jobs.
-  const boss = getBoss();
-  const data: WeeklyPushJobData = { runId: run.id };
-  await boss.send(queues.weeklyPush, data, {
-    singletonKey: `${run.id}`,
-    retryLimit: 0,
-  });
-
-  return { run, reused: false, recipientsCreated: created.length };
+  if (bundle.created) {
+    const { dispatchWeeklyPushOutbox } = await import("./weeklyPush.outbox");
+    await dispatchWeeklyPushOutbox();
+  }
+  return {
+    run: bundle.run,
+    reused: !bundle.created,
+    recipientsCreated: bundle.recipientsCreated,
+  };
 }
 
 /**
@@ -282,40 +270,22 @@ export async function retryFailedRecipients(
     throw new Error("no failed recipients to retry");
   }
 
-  const newRun = await weeklyPushRepo.createRun({
-    pushType: source.pushType,
-    weekStartDate: source.weekStartDate,
-    weekEndDate: source.weekEndDate,
-    triggerSource: "retry",
-    status: "queued",
-    dryRun: source.dryRun,
-    totalCount: failed.length,
+  for (const recipient of failed) {
+    await weeklyPushRepo.updateRecipient(recipient.id, {
+      status: "pending",
+      completedAt: null,
+      nextRetryAt: null,
+      errorCode: null,
+      errorMessage: null,
+    });
+    await enqueueRecipientJob(source.id, recipient.id, true);
+  }
+  await weeklyPushRepo.updateRun(source.id, {
+    status: "sending",
+    completedAt: undefined,
+    errorMessage: null,
   });
-
-  const rows: InsertWeeklyPushRecipient[] = failed.map((f) => ({
-    runId: newRun.id,
-    recipientType: f.recipientType,
-    recipientId: f.recipientId,
-    recipientName: f.recipientName,
-    lineUserId: f.lineUserId,
-    status: source.dryRun ? "skipped" : "pending",
-    payloadJson: f.payloadJson,
-  }));
-  const created = await weeklyPushRepo.createRecipientsBulk(rows);
-
-  await weeklyPushRepo.updateRun(newRun.id, {
-    totalCount: created.length,
-    skippedCount: source.dryRun ? created.length : 0,
-  });
-
-  const boss = getBoss();
-  const data: WeeklyPushJobData = { runId: newRun.id };
-  await boss.send(queues.weeklyPush, data, {
-    singletonKey: `${newRun.id}`,
-    retryLimit: 0,
-  });
-
-  return { run: newRun, reused: false, recipientsCreated: created.length };
+  return { run: (await weeklyPushRepo.getRunById(source.id))!, reused: true, recipientsCreated: failed.length };
 }
 
 /**
@@ -341,11 +311,12 @@ export const RECIPIENT_RETRY_DELAY_SECONDS = 60;
 export async function enqueueRecipientJob(
   runId: string,
   recipientId: string,
+  manualRetry = false,
 ): Promise<void> {
   const boss = getBoss();
   const data: WeeklyPushRecipientJobData = { runId, recipientId };
   await boss.send(queues.weeklyPushRecipient, data, {
-    singletonKey: `${runId}:${recipientId}`,
+    singletonKey: `${runId}:${recipientId}:${manualRetry ? randomUUID() : "initial"}`,
     retryLimit: RECIPIENT_RETRY_LIMIT,
     retryDelay: RECIPIENT_RETRY_DELAY_SECONDS,
     retryBackoff: true,

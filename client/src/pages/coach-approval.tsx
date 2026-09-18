@@ -730,7 +730,7 @@ function RagicSyncSection() {
           Ragic 資料同步
         </CardTitle>
         <p className="text-sm text-muted-foreground">
-          自動從 Ragic 同步場館和教練資料（每 30 分鐘），僅新增不存在的資料
+          自動從 Ragic 同步場館和教練資料（每日 03:00），僅新增不存在的資料
         </p>
       </CardHeader>
       <CardContent>
@@ -1143,8 +1143,6 @@ function NotificationSection() {
   const [selectedDate, setSelectedDate] = useState(today);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [logPreview, setLogPreview] = useState<LogPreview | null>(null);
-  const [weeklyResult, setWeeklyResult] = useState<string | null>(null);
-  const [isSendingWeekly, setIsSendingWeekly] = useState(false);
   const [venueFilter, setVenueFilter] = useState("__all__");
   const [coachFilter, setCoachFilter] = useState("__all__");
   const [scheduleModifiedAt, setScheduleModifiedAt] = useState<number>(
@@ -1259,23 +1257,6 @@ function NotificationSection() {
     },
   });
 
-  const sendWeeklyNotification = async () => {
-    setIsSendingWeekly(true);
-    setWeeklyResult(null);
-    try {
-      const res = await fetch("/api/admin/send-weekly-notifications", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-admin-password": adminPassword() },
-      });
-      const data = await res.json();
-      setWeeklyResult(res.ok ? "推播已成功發送！" : `失敗：${data.message || "未知錯誤"}`);
-    } catch {
-      setWeeklyResult("發送失敗：網路錯誤");
-    } finally {
-      setIsSendingWeekly(false);
-    }
-  };
-
   const formatSentAt = (sentAt: string) => {
     try {
       const d = new Date(sentAt);
@@ -1308,7 +1289,7 @@ function NotificationSection() {
           <div className="flex-[4] bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm space-y-2">
             <p className="font-semibold text-blue-800">📅 自動推播排程</p>
             <div className="space-y-1 text-blue-700">
-              <p>● <span className="font-medium">每週日 20:00</span>（台灣時間）→ 發送下週完整課表給所有教練</p>
+              <p>● <span className="font-medium">每週日 20:00</span>（台灣時間）→ 由新版可靠推播佇列發送</p>
               <p>● <span className="font-medium">每日 19:00</span>（台灣時間）→ 發送明日課表給隔日有排課的教練</p>
             </div>
             <p className="text-blue-500 text-xs pt-1">
@@ -1316,23 +1297,17 @@ function NotificationSection() {
             </p>
           </div>
 
-          {/* 手動群體發送 — 1 part */}
+          {/* Weekly sends are managed only from the pg-boss console. */}
           <div className="flex-[1] border rounded-lg p-4 flex flex-col gap-2 min-w-[140px]">
             <p className="font-semibold text-sm">✉️ 手動群體發送</p>
             <Button
               size="sm"
-              onClick={sendWeeklyNotification}
-              disabled={isSendingWeekly}
+              onClick={() => { window.location.href = "/mgt-x9k7p2/weekly-push"; }}
               className="bg-green-500 hover:bg-green-600 text-xs"
             >
               <Send className="h-3 w-3 mr-1" />
-              {isSendingWeekly ? "發送中..." : "立即發送下週課程通知"}
+              前往週推播管理
             </Button>
-            {weeklyResult && (
-              <p className={`text-xs ${weeklyResult.includes("成功") ? "text-green-600" : "text-red-600"}`}>
-                {weeklyResult}
-              </p>
-            )}
           </div>
         </div>
 

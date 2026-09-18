@@ -34,6 +34,7 @@ export interface LinePushResult {
 export async function sendTextMessage(
   to: string,
   text: string,
+  retryKey?: string,
 ): Promise<LinePushResult> {
   const token = env.lineChannelAccessToken;
   if (!token) {
@@ -50,6 +51,7 @@ export async function sendTextMessage(
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
+      ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}),
     },
     body: JSON.stringify({
       to,

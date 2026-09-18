@@ -3,11 +3,22 @@ import {
   initializeSchoolSchema,
   isValidSchoolCode,
   getAvailableSchools,
+  getSchoolPublicInfo,
 } from "../multi-school-db";
 import * as schoolRepo from "./school.repo";
 import { env } from "../config/env";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
-import { requireTeacherPortalAuth } from "../shared/auth/teacherPortal";
+import {
+  createTeacherAccessToken,
+  listTeacherAccessTokens,
+  listTeacherAccessAuditLogs,
+  requireTeacherIdentity,
+  revokeTeacherAccessToken,
+  TEACHER_PERMISSIONS,
+  type TeacherIdentityRequest,
+  type TeacherPermission,
+} from "../shared/auth/teacherIdentity";
+import { z } from "zod";
 
 /**
  * Defence-in-depth: schoolCode must pass BOTH the regex (no SQL-unsafe chars)
@@ -25,6 +36,35 @@ const validateSchoolCode = (req: Request, res: Response, next: NextFunction) => 
 };
 
 export function registerSchoolRoutes(app: Express): void {
+  app.get("/api/admin/schools", requireAdminPassword, (_req, res) => {
+    res.json({ schools: getAvailableSchools().map(getSchoolPublicInfo) });
+  });
+  app.get("/api/:schoolCode/public-info", validateSchoolCode, (req, res) => {
+    res.json(getSchoolPublicInfo(req.params.schoolCode));
+  });
+
+  app.get(
+    "/api/:schoolCode/teacher/me",
+    validateSchoolCode,
+    requireTeacherIdentity("feedback:read"),
+    (req: TeacherIdentityRequest, res) => res.json(req.teacherIdentity),
+  );
+
+  app.get(
+    "/api/:schoolCode/teacher/schedules",
+    validateSchoolCode,
+    requireTeacherIdentity("feedback:read"),
+    async (req: TeacherIdentityRequest, res) => {
+      const identity = req.teacherIdentity!;
+      const { startDate, endDate } = req.query as { startDate?: string; endDate?: string };
+      const list = await schoolRepo.listSchedules(identity.schoolCode, {
+        teacher: identity.teacherName,
+        startDate,
+        endDate,
+      });
+      res.json(list);
+    },
+  );
   app.post("/api/admin/init-school/:schoolCode", requireAdminPassword, async (req, res) => {
     try {
       const { schoolCode } = req.params;
@@ -57,7 +97,7 @@ export function registerSchoolRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/:schoolCode/teachers", validateSchoolCode, async (req, res) => {
+  app.get("/api/:schoolCode/teachers", validateSchoolCode, requireAdminPassword, async (req, res) => {
     try {
       const teachers = await schoolRepo.listTeachers(req.params.schoolCode);
       console.log(
@@ -112,14 +152,13 @@ export function registerSchoolRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/:schoolCode/feedbacks", validateSchoolCode, requireTeacherPortalAuth, async (req, res) => {
+  app.get("/api/:schoolCode/feedbacks", validateSchoolCode, requireTeacherIdentity("feedback:read"), async (req: TeacherIdentityRequest, res) => {
     try {
-      const { teacher, scheduleId } = req.query as {
-        teacher?: string;
+      const { scheduleId } = req.query as {
         scheduleId?: string;
       };
       const list = await schoolRepo.listFeedbacks(req.params.schoolCode, {
-        teacher,
+        teacherId: req.teacherIdentity!.teacherId,
         scheduleId,
       });
       res.json(list);
@@ -129,7 +168,7 @@ export function registerSchoolRoutes(app: Express): void {
     }
   });
 
-  app.post("/api/:schoolCode/feedbacks", validateSchoolCode, requireTeacherPortalAuth, async (req, res) => {
+  app.post("/api/:schoolCode/feedbacks", validateSchoolCode, requireTeacherIdentity("feedback:write"), async (req: TeacherIdentityRequest, res) => {
     const isDeployment = env.isDeployment;
     const { schoolCode } = req.params;
 
@@ -154,9 +193,13 @@ export function registerSchoolRoutes(app: Express): void {
           .json({ message: "Invalid schedule ID - ID is required" });
       }
 
-      // Validate via the shared zod schema before going into the repo
-      const { insertTeacherFeedbackSchema } = await import("@shared/schema");
-      const validation = insertTeacherFeedbackSchema.safeParse(req.body);
+      const validation = z.object({
+        scheduleId: z.string().min(10),
+        status: z.enum(["need_coop", "no_coop", "reschedule"]),
+        rescheduleDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullish(),
+        reschedulePeriod: z.string().max(50).nullish(),
+        comment: z.string().max(2000).nullish(),
+      }).safeParse(req.body);
       if (!validation.success) {
         console.error("❌ Validation failed:", validation.error.issues);
         return res.status(400).json({
@@ -166,6 +209,7 @@ export function registerSchoolRoutes(app: Express): void {
       }
 
       const feedbackData = validation.data;
+      const identity = req.teacherIdentity!;
       if (feedbackData.status === "reschedule") {
         if (!feedbackData.rescheduleDate || !feedbackData.reschedulePeriod) {
           return res.status(400).json({
@@ -175,9 +219,22 @@ export function registerSchoolRoutes(app: Express): void {
         }
       }
 
+      const canAccess = await schoolRepo.teacherCanAccessSchedule(
+        schoolCode,
+        feedbackData.scheduleId,
+        identity.teacherName,
+      );
+      if (!canAccess) {
+        return res.status(403).json({
+          code: "teacher_schedule_denied",
+          message: "您無權回覆這堂課",
+        });
+      }
+
       const saved = await schoolRepo.upsertFeedback(schoolCode, {
         scheduleId: feedbackData.scheduleId,
-        teacherName: feedbackData.teacherName,
+        teacherId: identity.teacherId,
+        teacherName: identity.teacherName,
         status: feedbackData.status,
         rescheduleDate: feedbackData.rescheduleDate || null,
         reschedulePeriod: feedbackData.reschedulePeriod || null,
@@ -200,7 +257,73 @@ export function registerSchoolRoutes(app: Express): void {
     }
   });
 
-  app.post("/api/:schoolCode/schedules", validateSchoolCode, async (req, res) => {
+  app.get(
+    "/api/admin/:schoolCode/feedbacks",
+    validateSchoolCode,
+    requireAdminPassword,
+    async (req, res) => {
+      const { teacherId, scheduleId } = req.query as { teacherId?: string; scheduleId?: string };
+      res.json(await schoolRepo.listFeedbacks(req.params.schoolCode, { teacherId, scheduleId }));
+    },
+  );
+
+  app.get(
+    "/api/admin/:schoolCode/teacher-links",
+    validateSchoolCode,
+    requireAdminPassword,
+    async (req, res) => res.json({ links: await listTeacherAccessTokens(req.params.schoolCode) }),
+  );
+
+  app.get(
+    "/api/admin/:schoolCode/teacher-links/audit",
+    requireAdminPassword,
+    async (req, res) => res.json({
+      logs: await listTeacherAccessAuditLogs(
+        req.params.schoolCode,
+        Number(req.query.limit) || 200,
+      ),
+    }),
+  );
+
+  app.post(
+    "/api/admin/:schoolCode/teacher-links",
+    validateSchoolCode,
+    requireAdminPassword,
+    async (req, res) => {
+      const parsed = z.object({
+        teacherId: z.string().min(1),
+        permissions: z.array(z.enum(TEACHER_PERMISSIONS)).min(1),
+        expiresAt: z.string().datetime(),
+      }).safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ message: "連結資料格式錯誤", issues: parsed.error.issues });
+      try {
+        const created = await createTeacherAccessToken({
+          schoolCode: req.params.schoolCode,
+          teacherId: parsed.data.teacherId,
+          permissions: parsed.data.permissions as TeacherPermission[],
+          expiresAt: new Date(parsed.data.expiresAt),
+        });
+        const url = `${env.publicOrigin}/teacher/${encodeURIComponent(req.params.schoolCode)}?token=${encodeURIComponent(created.token)}`;
+        res.status(201).json({ link: created.record, teacher: created.teacher, url });
+      } catch (error) {
+        res.status(400).json({ message: error instanceof Error ? error.message : "建立連結失敗" });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/:schoolCode/teacher-links/:id/revoke",
+    validateSchoolCode,
+    requireAdminPassword,
+    async (req, res) => {
+      const links = await listTeacherAccessTokens(req.params.schoolCode);
+      if (!links.some((link) => link.id === req.params.id)) return res.status(404).json({ message: "找不到連結" });
+      await revokeTeacherAccessToken(req.params.id);
+      res.json({ success: true });
+    },
+  );
+
+  app.post("/api/:schoolCode/schedules", validateSchoolCode, requireAdminPassword, async (req, res) => {
     try {
       const result = await schoolRepo.createSchoolSchedule(
         req.params.schoolCode,
@@ -221,6 +344,7 @@ export function registerSchoolRoutes(app: Express): void {
   app.delete(
     "/api/:schoolCode/schedules/:scheduleId",
     validateSchoolCode,
+    requireAdminPassword,
     async (req, res) => {
       try {
         const ok = await schoolRepo.deleteSchoolSchedule(

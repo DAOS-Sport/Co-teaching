@@ -65,7 +65,10 @@ export const schedules = pgTable("schedules", {
   className: varchar("class_name"),
   coachName: varchar("coach_name"),
   coachName2: varchar("coach_name_2"),
-  coach1IsTeaching: boolean("coach1_is_teaching").notNull().default(false),
+  coachUserId: varchar("coach_user_id"),
+  coachUserId2: varchar("coach_user_id_2"),
+  version: integer("version").notNull().default(1),
+  coach1IsTeaching: boolean("coach1_is_teaching").notNull().default(true),
   coach2IsTeaching: boolean("coach2_is_teaching").notNull().default(false),
   coachCount: integer("coach_count").notNull().default(1),
   isClassLocked: boolean("is_class_locked").notNull().default(false),
@@ -81,6 +84,12 @@ export const schedules = pgTable("schedules", {
   index("idx_schedules_date").on(table.date),
   index("idx_schedules_coach_name").on(table.coachName),
   index("idx_schedules_coach_name_2").on(table.coachName2),
+  uniqueIndex("uniq_schedule_class_in_cell").on(
+    table.venueId,
+    table.date,
+    table.timeSlotId,
+    sql`lower(regexp_replace(trim(${table.className}), '\\s+', '', 'g'))`,
+  ).where(sql`${table.className} IS NOT NULL AND trim(${table.className}) <> ''`),
 ]);
 
 // 教練用戶表 - LINE 登入的教練帳號（前台系統）
@@ -91,6 +100,7 @@ export const coachUsers = pgTable("coach_users", {
   phone: varchar("phone"),
   email: varchar("email"),
   employeeId: varchar("employee_id"), // 員工帳號（從 Ragic 同步）
+  ragicRecordId: varchar("ragic_record_id").unique(),
   status: varchar("status").notNull().default("pending"), // pending / approved / rejected
   role: varchar("role").notNull().default("coach"), // admin / coach
   linkedCoachName: varchar("linked_coach_name"), // 對應排課系統中的教練名稱
@@ -119,6 +129,7 @@ export const teachers = pgTable("teachers", {
 export const teacherFeedbacks = pgTable("teacher_feedbacks", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   scheduleId: varchar("schedule_id").notNull().references(() => schedules.id, { onDelete: 'cascade' }),
+  teacherId: varchar("teacher_id").references(() => teachers.id),
   teacherName: varchar("teacher_name").notNull(),
   status: varchar("status").notNull(), // need_coop / no_coop / reschedule
   rescheduleDate: date("reschedule_date"), // 調課日期（status=reschedule時必填）
@@ -128,7 +139,38 @@ export const teacherFeedbacks = pgTable("teacher_feedbacks", {
 }, (table) => [
   // 同一老師對同一課程只保留最後一次回覆
   unique("teacher_feedbacks_schedule_id_teacher_name_unique").on(table.scheduleId, table.teacherName),
+  uniqueIndex("teacher_feedbacks_schedule_id_teacher_id_unique")
+    .on(table.scheduleId, table.teacherId)
+    .where(sql`${table.teacherId} IS NOT NULL`),
 ]);
+
+export const teacherAccessTokens = pgTable("teacher_access_tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  jti: varchar("jti").notNull().unique("teacher_access_tokens_jti_key"),
+  tokenHash: varchar("token_hash").notNull().unique("teacher_access_tokens_hash_key"),
+  schoolCode: varchar("school_code").notNull(),
+  teacherId: varchar("teacher_id").notNull(),
+  permissions: jsonb("permissions").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  createdBy: varchar("created_by").notNull().default("admin-password"),
+}, (table) => [
+  index("idx_teacher_access_tokens_school_teacher").on(table.schoolCode, table.teacherId),
+  index("idx_teacher_access_tokens_expires").on(table.expiresAt),
+]);
+
+export const teacherAccessAuditLogs = pgTable("teacher_access_audit_logs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tokenId: varchar("token_id").references(() => teacherAccessTokens.id, { onDelete: "set null" }),
+  schoolCode: varchar("school_code").notNull(),
+  teacherId: varchar("teacher_id").notNull(),
+  event: varchar("event").notNull(),
+  path: text("path"),
+  ipAddress: varchar("ip_address"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+}, (table) => [index("idx_teacher_access_audit_token").on(table.tokenId, table.createdAt)]);
 
 // 系統設定表 - 存儲教練守則等設定
 export const systemSettings = pgTable("system_settings", {
@@ -150,23 +192,25 @@ export const venueInfos = pgTable("venue_infos", {
 export const coachVenuePreferences = pgTable("coach_venue_preferences", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   coachName: varchar("coach_name").notNull(),
+  coachUserId: varchar("coach_user_id"),
   venueName: varchar("venue_name").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
-  unique("coach_venue_preferences_coach_name_venue_name_key").on(table.coachName, table.venueName),
+  unique("preferences_coach_id_venue").on(table.coachUserId, table.venueName),
 ]);
 
 export const coachAvailability = pgTable("coach_availability", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   coachName: varchar("coach_name").notNull(),
+  coachUserId: varchar("coach_user_id"),
   weekStart: date("week_start").notNull(),
   dayOfWeek: integer("day_of_week").notNull(),
   timeSlotOrder: integer("time_slot_order").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
   // 名稱明確指定為 DB 既有 constraint（PG 自動截斷至 63 字元，以 _time_s_key 結尾）
-  unique("coach_availability_coach_name_week_start_day_of_week_time_s_key").on(
-    table.coachName,
+  unique("availability_coach_id_slot").on(
+    table.coachUserId,
     table.weekStart,
     table.dayOfWeek,
     table.timeSlotOrder,
@@ -182,7 +226,9 @@ export const weeklyPushRuns = pgTable("weekly_push_runs", {
   weekStartDate: date("week_start_date").notNull(),
   weekEndDate: date("week_end_date").notNull(),
   triggerSource: varchar("trigger_source").notNull(), // 'cron' | 'manual' | 'retry'
-  status: varchar("status").notNull(), // queued|running|success|partial_failed|failed
+  destination: varchar("destination").notNull().default("coaches"),
+  idempotencyKey: varchar("idempotency_key").notNull(),
+  status: varchar("status").notNull(), // queued|preparing|sending|reconciling|success|partial_success|failed|cancelled
   dryRun: boolean("dry_run").notNull().default(false),
   startedAt: timestamp("started_at"),
   completedAt: timestamp("completed_at"),
@@ -197,6 +243,13 @@ export const weeklyPushRuns = pgTable("weekly_push_runs", {
 }, (table) => [
   index("idx_weekly_push_runs_status").on(table.status),
   index("idx_weekly_push_runs_week").on(table.weekStartDate, table.weekEndDate),
+  uniqueIndex("uniq_weekly_push_delivery").on(
+    table.pushType,
+    table.weekStartDate,
+    table.destination,
+    table.dryRun,
+  ),
+  uniqueIndex("uniq_weekly_push_idempotency_key").on(table.idempotencyKey),
 ]);
 
 // One row per recipient per run; the worker updates each row as it sends.
@@ -208,8 +261,14 @@ export const weeklyPushRecipients = pgTable("weekly_push_recipients", {
   recipientName: varchar("recipient_name").notNull(),
   lineUserId: varchar("line_user_id"), // null when coach has no LINE binding
   status: varchar("status").notNull(), // pending|success|failed|skipped
+  deliveryKey: varchar("delivery_key").notNull(),
+  lineRetryKey: varchar("line_retry_key").notNull(),
   attemptCount: integer("attempt_count").notNull().default(0),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  nextRetryAt: timestamp("next_retry_at"),
   sentAt: timestamp("sent_at"),
+  lineResponseCode: integer("line_response_code"),
   errorCode: varchar("error_code"),
   errorMessage: text("error_message"),
   payloadJson: jsonb("payload_json"),
@@ -218,12 +277,32 @@ export const weeklyPushRecipients = pgTable("weekly_push_recipients", {
 }, (table) => [
   index("idx_weekly_push_recipients_run").on(table.runId),
   index("idx_weekly_push_recipients_status").on(table.runId, table.status),
+  uniqueIndex("uniq_weekly_push_recipient_delivery_key").on(table.deliveryKey),
 ]);
 
 export type WeeklyPushRun = typeof weeklyPushRuns.$inferSelect;
 export type InsertWeeklyPushRun = typeof weeklyPushRuns.$inferInsert;
 export type WeeklyPushRecipient = typeof weeklyPushRecipients.$inferSelect;
 export type InsertWeeklyPushRecipient = typeof weeklyPushRecipients.$inferInsert;
+
+export const weeklyPushOutbox = pgTable("weekly_push_outbox", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  runId: varchar("run_id").notNull().references(() => weeklyPushRuns.id, { onDelete: "cascade" }),
+  queueName: varchar("queue_name").notNull(),
+  payloadJson: jsonb("payload_json").notNull(),
+  status: varchar("status").notNull().default("pending"), // pending|published|failed
+  attemptCount: integer("attempt_count").notNull().default(0),
+  lastError: text("last_error"),
+  nextAttemptAt: timestamp("next_attempt_at"),
+  publishedAt: timestamp("published_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (table) => [
+  uniqueIndex("uniq_weekly_push_outbox_run").on(table.runId),
+  index("idx_weekly_push_outbox_pending").on(table.status, table.nextAttemptAt),
+]);
+
+export type WeeklyPushOutbox = typeof weeklyPushOutbox.$inferSelect;
 
 export const lineNotifyLogs = pgTable("line_notify_logs", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -306,6 +385,8 @@ export type InsertTeacher = typeof teachers.$inferInsert;
 export type Teacher = typeof teachers.$inferSelect;
 export type InsertTeacherFeedback = typeof teacherFeedbacks.$inferInsert;
 export type TeacherFeedback = typeof teacherFeedbacks.$inferSelect;
+export type TeacherAccessToken = typeof teacherAccessTokens.$inferSelect;
+export type TeacherAccessAuditLog = typeof teacherAccessAuditLogs.$inferSelect;
 export type CoachUser = typeof coachUsers.$inferSelect;
 export type InsertCoachUser = typeof coachUsers.$inferInsert;
 export type SystemSetting = typeof systemSettings.$inferSelect;
@@ -313,6 +394,7 @@ export type VenueInfo = typeof venueInfos.$inferSelect;
 export type InsertVenueInfo = typeof venueInfos.$inferInsert;
 
 export const insertScheduleSchema = createInsertSchema(schedules).omit({
+  version: true,
   id: true,
   createdAt: true,
   updatedAt: true,

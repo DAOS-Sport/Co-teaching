@@ -50,7 +50,9 @@ export function statusBadge(status: string) {
           排程中
         </Badge>
       );
-    case "running":
+    case "preparing":
+    case "sending":
+    case "reconciling":
       return (
         <Badge
           variant="outline"
@@ -67,13 +69,15 @@ export function statusBadge(status: string) {
           全部成功
         </Badge>
       );
-    case "partial_failed":
+    case "partial_success":
       return (
         <Badge className="bg-yellow-500 hover:bg-yellow-600 whitespace-nowrap">
           <AlertTriangle className="h-3 w-3 mr-1" />
           部分失敗
         </Badge>
       );
+    case "cancelled":
+      return <Badge variant="outline">已取消</Badge>;
     case "failed":
       return (
         <Badge variant="destructive" className="whitespace-nowrap">
@@ -114,6 +118,12 @@ export function recipientStatusBadge(status: string) {
           等待中
         </Badge>
       );
+    case "sending":
+      return <Badge className="bg-blue-500 whitespace-nowrap">發送中</Badge>;
+    case "retry_wait":
+      return <Badge className="bg-amber-500 whitespace-nowrap">等待重試</Badge>;
+    case "cancelled":
+      return <Badge variant="outline">已取消</Badge>;
     default:
       return <Badge variant="outline">{status}</Badge>;
   }

@@ -1,4 +1,4 @@
-import { useLocation } from "wouter";
+import { Link, useLocation } from "wouter";
 
 export type ActiveTab =
   | "coach-view"
@@ -9,6 +9,7 @@ export type ActiveTab =
   | "approval"
   | "weekly-push"
   | "sop"
+  | "it-governance"
   | "coach-portal";
 
 interface NavItem {
@@ -28,6 +29,7 @@ const navItems: NavItem[] = [
   { key: "approval",        label: "教練審核", icon: "fa-user-check",   path: "/mgt-x9k7p2/approval" },
   { key: "weekly-push",     label: "週推播",   icon: "fa-paper-plane",  path: "/mgt-x9k7p2/weekly-push" },
   { key: "sop",             label: "SOP說明",  icon: "fa-book-open",    path: "/mgt-x9k7p2/sop" },
+  { key: "it-governance",   label: "IT治理",   icon: "fa-shield-halved", path: "/mgt-x9k7p2/it-governance" },
   { key: "coach-portal",    label: "教練前台", icon: "fa-door-open",    path: "/coach-portal", isGreen: true },
 ];
 
@@ -46,7 +48,7 @@ export default function AdminLayout({
   rightPanel,
   children,
 }: AdminLayoutProps) {
-  const [, setLocation] = useLocation();
+  const [location] = useLocation();
 
   return (
     <div className="flex flex-col h-screen bg-background overflow-hidden">
@@ -68,12 +70,14 @@ export default function AdminLayout({
       <nav className="flex-shrink-0 bg-card border-b border-border overflow-x-auto scrollbar-none">
         <div className="flex min-w-max">
           {navItems.map((item) => {
-            const isActive = item.key === activeTab;
+            const isActive = location === item.path ||
+              (item.key === "assign" && ["/mgt-x9k7p2/coach-assign", "/mgt-x9k7p2/coach-assignment"].includes(location)) ||
+              (!location && item.key === activeTab);
             const isGreen = !!item.isGreen;
             return (
-              <button
+              <Link
                 key={item.key}
-                onClick={() => setLocation(item.path)}
+                href={item.path}
                 className={`flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap border-b-2 min-w-[56px]
                   ${isActive
                     ? isGreen
@@ -86,7 +90,7 @@ export default function AdminLayout({
               >
                 <i className={`fas ${item.icon} text-sm`}></i>
                 <span className="text-[10px] leading-tight">{item.label}</span>
-              </button>
+              </Link>
             );
           })}
         </div>

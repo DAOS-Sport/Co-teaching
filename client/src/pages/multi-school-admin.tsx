@@ -12,6 +12,7 @@ import { format, addDays, startOfWeek, addWeeks } from 'date-fns';
 import { zhTW } from 'date-fns/locale';
 import { School, ChevronLeft, ChevronRight, Edit, Plus, Save, X } from 'lucide-react';
 import type { Schedule, TimeSlot, Venue, TeacherFeedback } from '@shared/schema';
+import TeacherLinkManager from '@/components/teacher-link-manager';
 
 // 多學校管理後台
 export default function MultiSchoolAdmin() {
@@ -37,7 +38,7 @@ export default function MultiSchoolAdmin() {
     queryKey: [`/api/${selectedSchool}/schedules`, format(currentWeek, 'yyyy-MM-dd')],
     queryFn: async () => {
       const startDate = format(currentWeek, 'yyyy-MM-dd');
-      const endDate = format(addDays(currentWeek, 4), 'yyyy-MM-dd');
+      const endDate = format(addDays(currentWeek, 6), 'yyyy-MM-dd');
       const response = await fetch(`/api/${selectedSchool}/schedules?startDate=${startDate}&endDate=${endDate}`);
       if (!response.ok) {
         console.error('API 錯誤:', response.status, response.statusText);
@@ -75,7 +76,7 @@ export default function MultiSchoolAdmin() {
     queryKey: [`/api/${selectedSchool}/feedbacks`, 'all'],
     queryFn: async () => {
       const adminPassword = (typeof window !== 'undefined' && sessionStorage.getItem('admin-password')) || '';
-      const response = await fetch(`/api/${selectedSchool}/feedbacks`, {
+      const response = await fetch(`/api/admin/${selectedSchool}/feedbacks`, {
         headers: adminPassword ? { 'x-admin-password': adminPassword } : {},
       });
       if (!response.ok) {
@@ -91,7 +92,7 @@ export default function MultiSchoolAdmin() {
   const navigateToNextWeek = () => setCurrentWeek(prev => addWeeks(prev, 1));
   
   // 生成週內日期
-  const weekDays = Array.from({ length: 5 }, (_, i) => addDays(currentWeek, i));
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDays(currentWeek, i));
   
   // 根據時間段和日期組織課程數據
   const getScheduleForDayAndSlot = (date: Date, timeSlotId: string) => {
@@ -118,7 +119,10 @@ export default function MultiSchoolAdmin() {
     }) => {
       const response = await fetch(`/api/${selectedSchool}/schedules`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-password': sessionStorage.getItem('admin-password') || '',
+        },
         body: JSON.stringify({
           ...data,
           notes: '新增課程'
@@ -138,7 +142,8 @@ export default function MultiSchoolAdmin() {
   const deleteSchedule = useMutation({
     mutationFn: async (scheduleId: string) => {
       const response = await fetch(`/api/${selectedSchool}/schedules/${scheduleId}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        headers: { 'x-admin-password': sessionStorage.getItem('admin-password') || '' },
       });
       if (!response.ok) throw new Error('Failed to delete schedule');
       return response.json();
@@ -230,6 +235,7 @@ export default function MultiSchoolAdmin() {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <TeacherLinkManager />
         {/* 學校選擇和週期導航 */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6">
           <div className="flex items-center gap-4">
@@ -271,7 +277,7 @@ export default function MultiSchoolAdmin() {
               <ChevronLeft className="h-4 w-4" />
             </Button>
             <span className="text-sm font-medium min-w-32 text-center">
-              {format(currentWeek, 'MM/dd', { locale: zhTW })} - {format(addDays(currentWeek, 4), 'MM/dd', { locale: zhTW })}
+              {format(currentWeek, 'MM/dd', { locale: zhTW })} - {format(addDays(currentWeek, 6), 'MM/dd', { locale: zhTW })}
             </span>
             <Button
               variant="ghost"
@@ -287,7 +293,7 @@ export default function MultiSchoolAdmin() {
         {/* 學校課表主標題 */}
         <div className="text-center mb-6">
           <h2 className="text-xl font-bold">
-            {selectedSchoolInfo?.name} {format(currentWeek, 'MM.dd', { locale: zhTW })}-{format(addDays(currentWeek, 4), 'MM.dd', { locale: zhTW })}
+            {selectedSchoolInfo?.name} {format(currentWeek, 'MM.dd', { locale: zhTW })}-{format(addDays(currentWeek, 6), 'MM.dd', { locale: zhTW })}
           </h2>
         </div>
 

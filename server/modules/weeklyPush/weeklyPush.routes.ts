@@ -19,6 +19,9 @@ import {
   streamReport,
 } from "../../infra/files/reportStorage";
 import { renderXlsx } from "./weeklyPush.report";
+import { featureFlags } from "../../config/featureFlags";
+import { areWeeklyPushWorkersReady } from "./weeklyPush.worker";
+import { reconcileWeeklyPushRun } from "./weeklyPush.reconcile";
 
 const enqueueBodySchema = z.object({
   weekStartDate: z
@@ -58,6 +61,15 @@ export function registerWeeklyPushRoutes(app: Express): void {
           .json({ message: "weekStartDate / weekEndDate 必須一起提供" });
       }
       try {
+        if (dryRun !== true && (
+          !featureFlags.enableWeeklyPushQueue ||
+          !featureFlags.enableWeeklyPushWorker ||
+          !areWeeklyPushWorkersReady()
+        )) {
+          return res.status(503).json({
+            message: "週推播 worker 尚未就緒，已禁止正式發送",
+          });
+        }
         const result = await enqueueWeeklyPush({
           weekStartDate,
           weekEndDate,
@@ -77,6 +89,48 @@ export function registerWeeklyPushRoutes(app: Express): void {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    },
+  );
+
+  app.get(
+    "/api/admin/weekly-push/readiness",
+    requireAdminPassword,
+    (_req, res) => {
+      const ready = featureFlags.enableWeeklyPushQueue &&
+        featureFlags.enableWeeklyPushWorker && areWeeklyPushWorkersReady();
+      return res.status(ready ? 200 : 503).json({ ready });
+    },
+  );
+
+  app.post(
+    "/api/admin/weekly-push/runs/:runId/reconcile",
+    requireAdminPassword,
+    async (req, res) => {
+      try {
+        const run = await reconcileWeeklyPushRun(req.params.runId);
+        if (!run) return res.status(404).json({ message: "找不到週推播紀錄" });
+        return res.json({ run });
+      } catch (err) {
+        return res.status(500).json({ message: err instanceof Error ? err.message : String(err) });
+      }
+    },
+  );
+
+  app.post(
+    "/api/admin/weekly-push/runs/:runId/cancel",
+    requireAdminPassword,
+    async (req, res) => {
+      const run = await weeklyPushRepo.getRunById(req.params.runId);
+      if (!run) return res.status(404).json({ message: "找不到週推播紀錄" });
+      if (["success", "partial_success", "failed", "cancelled"].includes(run.status)) {
+        return res.status(409).json({ message: "此推播已結束，無法取消" });
+      }
+      const cancelledRecipients = await weeklyPushRepo.cancelUnsentRecipients(run.id);
+      const updated = await weeklyPushRepo.updateRun(run.id, {
+        status: "cancelled",
+        completedAt: new Date(),
+      });
+      return res.json({ run: updated, cancelledRecipients });
     },
   );
 

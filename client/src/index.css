@@ -130,6 +130,71 @@
   vertical-align: top;
 }
 
+/* The coach-assignment view shows five weekdays. The time column remains fixed
+   while the weekday columns share all remaining table width equally. */
+.coach-assignment-table {
+  width: 100%;
+  min-width: 1012px;
+  table-layout: fixed;
+}
+
+.coach-assignment-table col.time-column {
+  width: 112px;
+}
+
+.coach-assignment-table col.weekday-column {
+  width: calc((100% - 112px) / 5);
+}
+
+.coach-assignment-table .schedule-column,
+.coach-assignment-table .assignment-cell {
+  vertical-align: top;
+  overflow: visible;
+}
+
+.coach-assignment-table .assignment-card {
+  min-width: 0;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+
+.coach-assignment-table .coach-select-trigger {
+  min-height: 32px;
+  height: auto;
+  align-items: center;
+  text-align: left;
+}
+
+.coach-assignment-table .coach-select-trigger .coach-select-name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+
+.coach-assignment-table .coach-select-menu {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.coach-assignment-table .coach-select-menu button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.coach-assignment-table .coach-assignment-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 4px;
+}
+
+.coach-assignment-table .coach-role-select {
+  width: 76px;
+  min-width: 76px;
+  max-width: 76px;
+}
+
 /* 固定列樣式 - 確保sticky定位正常工作 */
 .time-cell {
   width: 120px;
@@ -163,7 +228,7 @@ td.sticky.left-0 {
     max-width: 120px;
     min-height: 60px;
   }
-  
+
   .time-cell {
     width: 80px;
     min-width: 80px;

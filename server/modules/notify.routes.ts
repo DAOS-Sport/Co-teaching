@@ -2,7 +2,6 @@ import type { Express } from "express";
 import { format } from "date-fns";
 import { storage } from "../storage";
 import {
-  sendWeeklyScheduleNotifications,
   sendDailyTomorrowNotifications,
   sendFillReminderToCoaches,
 } from "../line-notify";
@@ -11,20 +10,6 @@ import { env } from "../config/env";
 import { fetchWithTimeout } from "../shared/http/fetchWithTimeout";
 
 export function registerNotifyRoutes(app: Express): void {
-  app.post(
-    "/api/admin/send-weekly-notifications",
-    requireAdminPassword,
-    async (_req, res) => {
-      try {
-        await sendWeeklyScheduleNotifications();
-        res.json({ success: true, message: "推播已發送" });
-      } catch (error) {
-        console.error("Manual notification trigger error:", error);
-        res.status(500).json({ message: "推播發送失敗" });
-      }
-    }
-  );
-
   app.get(
     "/api/admin/notify-logs",
     requireAdminPassword,

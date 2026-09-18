@@ -69,8 +69,8 @@ export function RunDetailDialog({
     },
     onSuccess: (body) => {
       toast({
-        title: "已建立重試任務",
-        description: `新任務 ${String(body.newRunId).slice(0, 8)}... · ${body.recipientsCreated} 位收件人`,
+        title: "已排入失敗者重試",
+        description: `原任務 ${String(body.newRunId).slice(0, 8)}... · ${body.recipientsCreated} 位收件人`,
       });
       queryClient.invalidateQueries({
         queryKey: ["/api/admin/weekly-push/runs"],

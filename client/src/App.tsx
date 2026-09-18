@@ -1,4 +1,5 @@
-import { Switch, Route, useRoute } from "wouter";
+import { Switch, Route, useRoute, useLocation } from "wouter";
+import { useEffect } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -18,6 +19,7 @@ import CoachApproval from "@/pages/coach-approval";
 import CoachAssignment from "@/pages/coach-assignment";
 import WeeklyPush from "@/pages/weekly-push";
 import Sop from "@/pages/sop";
+import ItGovernance from "@/pages/it-governance";
 import SchoolView from "@/pages/school-view";
 import PasswordProtect from "@/components/password-protect";
 
@@ -37,10 +39,21 @@ function AdminSection() {
         <Route path="/mgt-x9k7p2/approval" component={CoachApproval} />
         <Route path="/mgt-x9k7p2/weekly-push" component={WeeklyPush} />
         <Route path="/mgt-x9k7p2/sop" component={Sop} />
+        <Route path="/mgt-x9k7p2/it-governance" component={ItGovernance} />
         <Route component={NotFound} />
       </Switch>
     </PasswordProtect>
   );
+}
+
+function CoachAssignmentRedirect() {
+  const [, navigate] = useLocation();
+  useEffect(() => navigate("/mgt-x9k7p2/assign", { replace: true }), [navigate]);
+  return null;
+}
+
+function ProtectedMultiSchoolAdmin() {
+  return <PasswordProtect><MultiSchoolAdmin /></PasswordProtect>;
 }
 
 function Router() {
@@ -56,7 +69,7 @@ function Router() {
       <Route path="/teacher/:schoolCode" component={TeacherPortal} />
       
       {/* Multi-school admin */}
-      <Route path="/multi-school-admin" component={MultiSchoolAdmin} />
+      <Route path="/multi-school-admin" component={ProtectedMultiSchoolAdmin} />
       
       {/* Individual school/venue public pages */}
       <Route path="/school/:venueName" component={SchoolView} />
@@ -65,6 +78,8 @@ function Router() {
       <Route path="/coach-portal" component={CoachPortal} />
       
       {/* Admin area — single password gate for all /mgt-x9k7p2/* routes */}
+      <Route path="/mgt-x9k7p2/coach-assign" component={CoachAssignmentRedirect} />
+      <Route path="/mgt-x9k7p2/coach-assignment" component={CoachAssignmentRedirect} />
       <Route path="/mgt-x9k7p2/:rest*" component={AdminSection} />
       
       {/* Auth pages */}

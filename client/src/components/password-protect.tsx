@@ -9,6 +9,38 @@ interface PasswordProtectProps {
   children: React.ReactNode;
 }
 
+const PERSISTED_ADMIN_KEY = "admin-session";
+const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+function persistAdminSession(password: string) {
+  sessionStorage.setItem("admin_authorized", "true");
+  sessionStorage.setItem("admin-password", password);
+  localStorage.setItem(PERSISTED_ADMIN_KEY, JSON.stringify({
+    password,
+    expiresAt: Date.now() + ADMIN_SESSION_TTL_MS,
+  }));
+}
+
+function restoreAdminSession(): string | null {
+  const currentPassword = sessionStorage.getItem("admin-password");
+  if (sessionStorage.getItem("admin_authorized") === "true" && currentPassword) {
+    return currentPassword;
+  }
+  try {
+    const raw = localStorage.getItem(PERSISTED_ADMIN_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw) as { password?: unknown; expiresAt?: unknown };
+    if (typeof saved.password !== "string" || typeof saved.expiresAt !== "number" || saved.expiresAt <= Date.now()) {
+      localStorage.removeItem(PERSISTED_ADMIN_KEY);
+      return null;
+    }
+    return saved.password;
+  } catch {
+    localStorage.removeItem(PERSISTED_ADMIN_KEY);
+    return null;
+  }
+}
+
 export default function PasswordProtect({ children }: PasswordProtectProps) {
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [password, setPassword] = useState("");
@@ -18,10 +50,24 @@ export default function PasswordProtect({ children }: PasswordProtectProps) {
   const [, setLocation] = useLocation();
 
   useEffect(() => {
-    if (sessionStorage.getItem("admin_authorized") === "true") {
-      setIsAuthorized(true);
+    const savedPassword = restoreAdminSession();
+    if (!savedPassword) {
+      setIsLoading(false);
+      return;
     }
-    setIsLoading(false);
+    fetch("/api/admin/verify-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-admin-password": savedPassword },
+      body: JSON.stringify({}),
+    }).then((res) => {
+      if (!res.ok) throw new Error("expired");
+      persistAdminSession(savedPassword);
+      setIsAuthorized(true);
+    }).catch(() => {
+      sessionStorage.removeItem("admin_authorized");
+      sessionStorage.removeItem("admin-password");
+      localStorage.removeItem(PERSISTED_ADMIN_KEY);
+    }).finally(() => setIsLoading(false));
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -39,8 +85,7 @@ export default function PasswordProtect({ children }: PasswordProtectProps) {
       });
       if (res.ok) {
         setIsAuthorized(true);
-        sessionStorage.setItem("admin_authorized", "true");
-        sessionStorage.setItem("admin-password", password);
+        persistAdminSession(password);
         toast({
           title: "驗證成功",
           description: "歡迎使用管理功能",

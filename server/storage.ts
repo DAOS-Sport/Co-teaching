@@ -68,12 +68,14 @@ export interface IStorage {
     endDate: string
   ): Promise<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]>;
   upsertSchedule(schedule: InsertScheduleType): Promise<Schedule>;
-  updateSchedule(id: string, updateData: ScheduleUpdateFields): Promise<Schedule>;
-  deleteSchedule(id: string): Promise<void>;
+  copyWeekIntoEmptyCells(input: Parameters<ScheduleRepository["copyWeekIntoEmptyCells"]>[0]): ReturnType<ScheduleRepository["copyWeekIntoEmptyCells"]>;
+  updateSchedule(id: string, updateData: ScheduleUpdateFields, expectedVersion: number): Promise<Schedule>;
+  deleteSchedule(id: string, expectedVersion: number): Promise<void>;
   getCoachSchedules(
     coachName: string,
     startDate: string,
-    endDate: string
+    endDate: string,
+    coachUserId?: string
   ): Promise<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]>;
   getScheduleById(id: string): Promise<Schedule | undefined>;
   getConflicts(
@@ -163,7 +165,7 @@ export interface IStorage {
     startDate: string,
     endDate: string
   ): Promise<void>;
-  assignCoach(scheduleId: string, coachName: string | null): Promise<Schedule>;
+  assignCoach(scheduleId: string, coachName: string | null, expectedVersion: number): Promise<Schedule>;
   getScheduleLockStatus(
     venueId: string,
     startDate: string,
@@ -174,23 +176,26 @@ export interface IStorage {
   getCoachAvailabilityByWeek(weekStart: string): Promise<CoachAvailability[]>;
   getCoachAvailabilityForCoach(
     coachName: string,
-    weekStart: string
+    weekStart: string,
+    coachUserId?: string
   ): Promise<CoachAvailability[]>;
   upsertCoachAvailability(
     coachName: string,
     weekStart: string,
-    slots: { dayOfWeek: number; timeSlotOrder: number }[]
+    slots: { dayOfWeek: number; timeSlotOrder: number }[],
+    coachUserId?: string
   ): Promise<void>;
 
   // Coach venue preferences
-  getCoachVenuePreferences(coachName: string): Promise<CoachVenuePreference[]>;
+  getCoachVenuePreferences(coachName: string, coachUserId?: string): Promise<CoachVenuePreference[]>;
   getAllCoachVenuePreferences(): Promise<CoachVenuePreference[]>;
   setCoachVenuePreferences(
     coachName: string,
     venueNames: string[]
   ): Promise<void>;
   getCoachFillStatus(
-    coachName: string
+    coachName: string,
+    coachUserId?: string
   ): Promise<{ availabilitySlots: number; venuePrefsCount: number }>;
 
   // LINE notify logs
@@ -235,12 +240,14 @@ export class DatabaseStorage implements IStorage {
     this.scheduleRepo.getVacantSchedules(venueId, startDate, endDate);
   upsertSchedule = (schedule: InsertScheduleType) =>
     this.scheduleRepo.upsertSchedule(schedule);
+  copyWeekIntoEmptyCells = (input: Parameters<ScheduleRepository["copyWeekIntoEmptyCells"]>[0]) =>
+    this.scheduleRepo.copyWeekIntoEmptyCells(input);
   getScheduleById = (id: string) => this.scheduleRepo.getScheduleById(id);
-  updateSchedule = (id: string, updateData: ScheduleUpdateFields) =>
-    this.scheduleRepo.updateSchedule(id, updateData);
-  deleteSchedule = (id: string) => this.scheduleRepo.deleteSchedule(id);
-  getCoachSchedules = (coachName: string, startDate: string, endDate: string) =>
-    this.scheduleRepo.getCoachSchedules(coachName, startDate, endDate);
+  updateSchedule = (id: string, updateData: ScheduleUpdateFields, expectedVersion: number) =>
+    this.scheduleRepo.updateSchedule(id, updateData, expectedVersion);
+  deleteSchedule = (id: string, expectedVersion: number) => this.scheduleRepo.deleteSchedule(id, expectedVersion);
+  getCoachSchedules = (coachName: string, startDate: string, endDate: string, coachUserId?: string) =>
+    this.scheduleRepo.getCoachSchedules(coachName, startDate, endDate, coachUserId);
   getConflicts = (date: string) => this.scheduleRepo.getConflicts(date);
   getCoachStatistics = (
     startDate: string,
@@ -261,8 +268,8 @@ export class DatabaseStorage implements IStorage {
     this.scheduleRepo.lockSchedules(venueId, startDate, endDate);
   unlockSchedules = (venueId: string, startDate: string, endDate: string) =>
     this.scheduleRepo.unlockSchedules(venueId, startDate, endDate);
-  assignCoach = (scheduleId: string, coachName: string | null) =>
-    this.scheduleRepo.assignCoach(scheduleId, coachName);
+  assignCoach = (scheduleId: string, coachName: string | null, expectedVersion: number) =>
+    this.scheduleRepo.assignCoach(scheduleId, coachName, expectedVersion);
   getScheduleLockStatus = (
     venueId: string,
     startDate: string,
@@ -296,21 +303,22 @@ export class DatabaseStorage implements IStorage {
     this.coachRepo.getColleaguesForCoach(coachName, date, venueIds);
   getCoachAvailabilityByWeek = (weekStart: string) =>
     this.coachRepo.getCoachAvailabilityByWeek(weekStart);
-  getCoachAvailabilityForCoach = (coachName: string, weekStart: string) =>
-    this.coachRepo.getCoachAvailabilityForCoach(coachName, weekStart);
+  getCoachAvailabilityForCoach = (coachName: string, weekStart: string, coachUserId?: string) =>
+    this.coachRepo.getCoachAvailabilityForCoach(coachName, weekStart, coachUserId);
   upsertCoachAvailability = (
     coachName: string,
     weekStart: string,
-    slots: { dayOfWeek: number; timeSlotOrder: number }[]
-  ) => this.coachRepo.upsertCoachAvailability(coachName, weekStart, slots);
-  getCoachVenuePreferences = (coachName: string) =>
-    this.coachRepo.getCoachVenuePreferences(coachName);
+    slots: { dayOfWeek: number; timeSlotOrder: number }[],
+    coachUserId?: string
+  ) => this.coachRepo.upsertCoachAvailability(coachName, weekStart, slots, coachUserId);
+  getCoachVenuePreferences = (coachName: string, coachUserId?: string) =>
+    this.coachRepo.getCoachVenuePreferences(coachName, coachUserId);
   getAllCoachVenuePreferences = () =>
     this.coachRepo.getAllCoachVenuePreferences();
   setCoachVenuePreferences = (coachName: string, venueNames: string[]) =>
     this.coachRepo.setCoachVenuePreferences(coachName, venueNames);
-  getCoachFillStatus = (coachName: string) =>
-    this.coachRepo.getCoachFillStatus(coachName);
+  getCoachFillStatus = (coachName: string, coachUserId?: string) =>
+    this.coachRepo.getCoachFillStatus(coachName, coachUserId);
 
   // ── LINE notify logs ─────────────────────────────────────────
   getNotifyLogsByDate = (date: string) =>
