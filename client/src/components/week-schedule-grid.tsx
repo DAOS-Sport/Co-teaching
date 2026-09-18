@@ -27,6 +27,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
   } | null>(null);
   const [editingValues, setEditingValues] = useState<Record<string, string>>({});
   const [editingSchedule, setEditingSchedule] = useState<string | null>(null);
+  const [editingVersion, setEditingVersion] = useState<number | undefined>();
   const [savingStates, setSavingStates] = useState<Record<string, boolean>>({});
 
   const weekDays = getExtendedWeekDays(weekStart); // 支援特殊工作日
@@ -142,7 +143,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
           s.timeSlotId === scheduleData.timeSlotId
         );
         if (existingSchedule) {
-          const response = await apiRequest('DELETE', `/api/schedules/${existingSchedule.id}`);
+          const response = await apiRequest('DELETE', `/api/schedules/${existingSchedule.id}`, { expectedVersion: existingSchedule.version });
           return response.json();
         }
         return null;
@@ -178,7 +179,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
 
   const deleteMutation = useMutation({
     mutationFn: async (scheduleId: string) => {
-      const response = await apiRequest('DELETE', `/api/schedules/${scheduleId}`);
+      const response = await apiRequest('DELETE', `/api/schedules/${scheduleId}`, { expectedVersion: editingSchedule === scheduleId ? editingVersion : schedules?.find(s => s.id === scheduleId)?.version });
       return response.json();
     },
     onSuccess: () => {
@@ -263,6 +264,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
       coachName: string;
     }) => {
       const response = await apiRequest('PUT', `/api/schedules/${updateData.scheduleId}`, {
+        expectedVersion: editingVersion,
         className: updateData.className,
         coachName: updateData.coachName,
       });
@@ -293,6 +295,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
       ? `${schedule.className}-${schedule.coachName}`
       : schedule.className || schedule.coachName || '';
     setEditingSchedule(schedule.id);
+    setEditingVersion(schedule.version);
     setEditingValues({ ...editingValues, [schedule.id]: displayValue });
   };
   

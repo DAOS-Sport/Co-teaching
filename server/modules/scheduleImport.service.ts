@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { lockScheduleWrites, writeSchedule } from "../shared/scheduleMutation";
+import { MutationError } from "../shared/audit";
 import { between, eq, sql } from "drizzle-orm";
 import { db } from "../db";
 import { coachUsers, schedules, timeSlots, venues } from "@shared/schema";
@@ -18,6 +21,7 @@ export type ScheduleImportPreviewRow = ScheduleImportInputRow & {
   timeSlotId: string | null;
   status: "create" | "update" | "skip" | "error";
   existingScheduleId: string | null;
+  expectedVersion: number | null;
   issues: ScheduleImportIssue[];
 };
 
@@ -28,6 +32,7 @@ export type ScheduleImportPreview = {
   parseErrors: ScheduleImportParseError[];
   summary: { total: number; create: number; update: number; skip: number; error: number; warning: number };
   canCommit: boolean;
+  previewToken: string;
 };
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -60,22 +65,21 @@ async function buildPreview(
       rows: [],
       parseErrors: parsed.errors,
       summary: { total: 0, create: 0, update: 0, skip: 0, error: parsed.errors.length, warning: 0 },
-      canCommit: false,
+      canCommit: false, previewToken: "invalid",
     };
   }
 
   const dates = parsed.rows.map((row) => row.date).sort();
-  const [slotRows, existing, approvedCoaches] = await Promise.all([
-    executor.select().from(timeSlots),
-    executor
+  // A transaction has one connection; run its queries sequentially.
+  const slotRows = await executor.select().from(timeSlots);
+  const existing = await executor
       .select()
       .from(schedules)
-      .where(between(schedules.date, dates[0], dates[dates.length - 1])),
-    executor
+      .where(between(schedules.date, dates[0], dates[dates.length - 1]));
+  const approvedCoaches = await executor
       .select({ name: coachUsers.name, linkedCoachName: coachUsers.linkedCoachName })
       .from(coachUsers)
-      .where(eq(coachUsers.status, "approved")),
-  ]);
+      .where(eq(coachUsers.status, "approved"));
   const slotByOrder = new Map(slotRows.map((slot) => [slot.order, slot]));
   const knownCoaches = new Set(
     approvedCoaches.flatMap((coach) => [coach.name, coach.linkedCoachName].filter(Boolean) as string[]),
@@ -139,6 +143,7 @@ async function buildPreview(
       timeSlotId: slot?.id ?? null,
       status,
       existingScheduleId: matching?.id ?? null,
+      expectedVersion: matching?.version ?? null,
       issues,
     };
   });
@@ -157,6 +162,7 @@ async function buildPreview(
     rows,
     parseErrors: parsed.errors,
     summary,
+    previewToken: createHash("sha256").update(JSON.stringify({ venueId, text, mode, rows })).digest("hex"),
     canCommit: summary.error === 0 && (summary.create > 0 || summary.update > 0),
   };
 }
@@ -165,12 +171,14 @@ export function previewScheduleImport(venueId: string, text: string, mode: Sched
   return buildPreview(db, venueId, text, mode);
 }
 
-export async function commitScheduleImport(venueId: string, text: string, mode: ScheduleImportMode) {
+export async function commitScheduleImport(venueId: string, text: string, mode: ScheduleImportMode, previewToken: string) {
   return db.transaction(async (tx) => {
+    await lockScheduleWrites(tx);
     // Serialize imports for the same venue. The lock is held only for this
     // transaction and ensures the re-preview sees any earlier import commit.
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${venueId}))`);
     const preview = await buildPreview(tx, venueId, text, mode);
+    if (!previewToken || preview.previewToken !== previewToken) throw new MutationError("IMPORT_PREVIEW_CONFLICT");
     if (!preview.canCommit) {
       return { committed: false as const, preview };
     }
@@ -189,9 +197,9 @@ export async function commitScheduleImport(venueId: string, text: string, mode: 
         updatedAt: now,
       };
       if (row.status === "update" && row.existingScheduleId) {
-        await tx.update(schedules).set(values).where(eq(schedules.id, row.existingScheduleId));
+        await writeSchedule(tx, row.existingScheduleId, values, row.expectedVersion ?? undefined);
       } else {
-        await tx.insert(schedules).values(values);
+        await writeSchedule(tx, null, values);
       }
     }
     return {

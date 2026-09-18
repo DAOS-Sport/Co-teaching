@@ -1,3 +1,4 @@
+import { MutationError } from "../shared/audit";
 import type { Express } from "express";
 import { storage } from "../storage";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
@@ -8,6 +9,7 @@ export function registerVenueRoutes(app: Express): void {
       const venues = await storage.getVenues();
       res.json(venues);
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({code:error.code,message:error.code});
       res.status(500).json({ message: "Failed to fetch venues" });
     }
   });
@@ -25,6 +27,7 @@ export function registerVenueRoutes(app: Express): void {
       const venue = await storage.createVenue(name, color);
       res.json(venue);
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({code:error.code,message:error.code});
       console.error("Error creating venue:", error);
       res.status(500).json({ message: "Failed to create venue" });
     }
@@ -35,6 +38,7 @@ export function registerVenueRoutes(app: Express): void {
       await storage.deleteVenue(req.params.id);
       res.json({ success: true });
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({code:error.code,message:error.code});
       console.error("Error deleting venue:", error);
       res.status(500).json({ message: "Failed to delete venue" });
     }
@@ -46,6 +50,7 @@ export function registerVenueRoutes(app: Express): void {
       const infos = await storage.getAllVenueInfos();
       res.json(infos);
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({code:error.code,message:error.code});
       console.error("Error fetching venue infos:", error);
       res.status(500).json({ message: "查詢場館資訊失敗" });
     }
@@ -66,6 +71,7 @@ export function registerVenueRoutes(app: Express): void {
         );
         res.json(info);
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({code:error.code,message:error.code});
         console.error("Error updating venue info:", error);
         res.status(500).json({ message: "更新場館資訊失敗" });
       }

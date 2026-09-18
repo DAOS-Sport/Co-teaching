@@ -438,7 +438,7 @@ function ApprovedDashboard({
     queryKey: ["/api/coach-portal/my-schedule", coachName, startDate, endDate],
     queryFn: async () => {
       const res = await fetch(
-        `/api/coach-portal/my-schedule?coachName=${encodeURIComponent(coachName)}&startDate=${startDate}&endDate=${endDate}`
+        `/api/coach-portal/my-schedule?coachName=${encodeURIComponent(coachName)}&startDate=${startDate}&endDate=${endDate}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } }
       );
       if (!res.ok) throw new Error("Failed");
       return res.json();
@@ -474,7 +474,7 @@ function ApprovedDashboard({
       const venueIds = todaySchedules.map(s => s.venueId);
       if (!venueIds.length) return [];
       const res = await fetch(
-        `/api/coach-portal/colleagues?coachName=${encodeURIComponent(coachName)}&date=${today}&venueIds=${venueIds.join(",")}`
+        `/api/coach-portal/colleagues?coachName=${encodeURIComponent(coachName)}&date=${today}&venueIds=${venueIds.join(",")}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } }
       );
       if (!res.ok) return [];
       return res.json();
@@ -499,7 +499,7 @@ function ApprovedDashboard({
     queryKey: ["/api/coach-portal/availability", coachName, format(availWeek, "yyyy-MM-dd")],
     queryFn: async () => {
       const res = await fetch(
-        `/api/coach-portal/availability?coachName=${encodeURIComponent(coachName)}&weekStart=${format(availWeek, "yyyy-MM-dd")}`
+        `/api/coach-portal/availability?coachName=${encodeURIComponent(coachName)}&weekStart=${format(availWeek, "yyyy-MM-dd")}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } }
       );
       if (!res.ok) return [];
       return res.json();
@@ -510,7 +510,7 @@ function ApprovedDashboard({
     queryKey: ["/api/coach-portal/assigned-slots", coachName, availStartDate, availEndDate],
     queryFn: async () => {
       const res = await fetch(
-        `/api/coach-portal/assigned-slots?coachName=${encodeURIComponent(coachName)}&startDate=${availStartDate}&endDate=${availEndDate}`
+        `/api/coach-portal/assigned-slots?coachName=${encodeURIComponent(coachName)}&startDate=${availStartDate}&endDate=${availEndDate}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } }
       );
       if (!res.ok) return [];
       return res.json();
@@ -532,7 +532,7 @@ function ApprovedDashboard({
   const { data: fillStatus } = useQuery<{ hasAvailability: boolean; hasVenuePrefs: boolean }>({
     queryKey: ["/api/coach-portal/fill-status", coachName],
     queryFn: async () => {
-      const res = await fetch(`/api/coach-portal/fill-status?coachName=${encodeURIComponent(coachName)}`);
+      const res = await fetch(`/api/coach-portal/fill-status?coachName=${encodeURIComponent(coachName)}`, { headers: { "x-coach-token": sessionStorage.getItem("coach_portal_token") || "" } });
       if (!res.ok) return { hasAvailability: false, hasVenuePrefs: false };
       return res.json();
     },

@@ -182,6 +182,9 @@ export async function initializeSchoolSchema(schoolCode: string) {
         class_name VARCHAR,
         coach_name VARCHAR,
         coach_name_2 VARCHAR,
+        coach_user_id VARCHAR,
+        coach_user_id_2 VARCHAR,
+        version INTEGER NOT NULL DEFAULT 1,
         coach1_is_teaching BOOLEAN NOT NULL DEFAULT false,
         coach2_is_teaching BOOLEAN NOT NULL DEFAULT false,
         is_class_locked BOOLEAN NOT NULL DEFAULT false,
@@ -192,6 +195,12 @@ export async function initializeSchoolSchema(schoolCode: string) {
     `);
 
     // 補上既有表格可能缺少的欄位（向下相容）
+    await mainDb.execute(sql`
+      ALTER TABLE ${schemaIdent}.schedules
+        ADD COLUMN IF NOT EXISTS coach_user_id VARCHAR,
+        ADD COLUMN IF NOT EXISTS coach_user_id_2 VARCHAR,
+        ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+    `);
     await mainDb.execute(sql`
       ALTER TABLE ${schemaIdent}.schedules ADD COLUMN IF NOT EXISTS coach_name_2 VARCHAR;
     `);

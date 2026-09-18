@@ -47,6 +47,7 @@ type ImportPreview = {
   parseErrors: { line: number; message: string }[];
   summary: { total: number; create: number; update: number; skip: number; error: number; warning: number };
   canCommit: boolean;
+  previewToken: string;
 };
 
 function ScheduleTextImportDialog({
@@ -104,7 +105,7 @@ function ScheduleTextImportDialog({
       const res = await fetch("/api/admin/schedules/import/commit", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-admin-password": adminPassword },
-        body: JSON.stringify({ venueId, text, mode }),
+        body: JSON.stringify({ venueId, text, mode, previewToken: preview?.previewToken }),
       });
       const data = await res.json();
       if (res.status === 409 && data.preview) {
@@ -369,7 +370,9 @@ function VenueScheduleEditContent() {
     mutationFn: async (scheduleId: string) => {
       const response = await fetch(`/api/schedules/${scheduleId}`, {
         method: "DELETE",
+        body: JSON.stringify({ expectedVersion: schedules.find(s => s.id === scheduleId)?.version }),
         headers: {
+          "Content-Type": "application/json",
           "x-admin-password": adminPassword,
         },
       });
@@ -418,7 +421,7 @@ function VenueScheduleEditContent() {
           "Content-Type": "application/json",
           "x-admin-password": adminPassword,
         },
-        body: JSON.stringify({ coachCount }),
+        body: JSON.stringify({ coachCount, expectedVersion: schedules.find(s => s.id === scheduleId)?.version }),
       });
       if (!response.ok) throw new Error(await response.text());
       return response.json();

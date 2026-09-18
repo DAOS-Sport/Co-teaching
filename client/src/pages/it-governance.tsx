@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import AdminLayout from "@/components/admin-layout";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,7 +11,10 @@ interface ServiceStatus {
   description: string;
   enabled: boolean;
   configured: boolean;
-  status: "ok" | "disabled" | "misconfigured";
+  status: "ok" | "disabled" | "misconfigured" | "error" | "timeout" | "unknown";
+  syncRun?: { id: string; status: string; total_count: number; success_count: number; failure_count: number };
+  checkedAt?: string;
+  code?: string;
   endpoints?: string[];
   lastSyncTime?: string | null;
   isSyncing?: boolean;
@@ -58,10 +61,30 @@ const AUTH_LABELS: Record<string, { label: string; color: string }> = {
 };
 
 const STATUS_CONFIG = {
+  error: { label: "異常", icon: "fa-circle-exclamation", color: "text-red-600" },
+  timeout: { label: "連線逾時", icon: "fa-clock", color: "text-red-600" },
+  unknown: { label: "尚未驗證", icon: "fa-circle-question", color: "text-amber-500" },
   ok: { label: "正常", icon: "fa-circle-check", color: "text-green-600" },
   disabled: { label: "已停用", icon: "fa-circle-minus", color: "text-gray-400" },
   misconfigured: { label: "未設定", icon: "fa-circle-exclamation", color: "text-amber-500" },
 };
+
+function RagicRecovery({ run }: { run: NonNullable<ServiceStatus["syncRun"]> }) {
+  const qc = useQueryClient();
+  const { data: items = [] } = useQuery<{kind:string;source_id:string;status:string;attempts:number;error_code:string|null}[]>({
+    queryKey: ["/api/admin/ragic-runs", run.id, "items"],
+  });
+  const retry = useMutation({ mutationFn: async () => {
+    const r = await fetch(`/api/admin/ragic-runs/${run.id}/retry`, { method: "POST", credentials: "include" });
+    if (!r.ok) throw new Error("補償失敗，請查看紀錄"); return r.json();
+  }, onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/admin/it-governance"] }); qc.invalidateQueries({queryKey: ["/api/admin/ragic-runs", run.id]}); } });
+  return <div className="text-xs space-y-2">
+    <p>{run.status}：成功 {run.success_count}／失敗 {run.failure_count}／共 {run.total_count} 筆</p>
+    {items.filter(i => i.status !== "succeeded").map(i => <p key={i.kind+i.source_id}>{i.kind} {i.source_id}：{i.status}（{i.attempts}/5）{i.error_code}</p>)}
+    {run.status !== "succeeded" && <button className="border rounded px-2 py-1" disabled={retry.isPending || run.status === "running"} onClick={() => retry.mutate()}>補償未完成項目</button>}
+    {retry.isError && <p role="alert">{retry.error.message}</p>}
+  </div>;
+}
 
 function ServiceCard({ svc }: { svc: ServiceStatus }) {
   const st = STATUS_CONFIG[svc.status];
@@ -78,6 +101,9 @@ function ServiceCard({ svc }: { svc: ServiceStatus }) {
         <p className="text-xs text-muted-foreground mt-0.5">{svc.description}</p>
       </CardHeader>
       <CardContent className="px-4 pb-3 space-y-2">
+        {svc.checkedAt && <p className="text-xs text-muted-foreground">檢查時間：{new Date(svc.checkedAt).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" })}（台北）</p>}
+        {svc.code && <p className="text-xs text-muted-foreground">{svc.code}</p>}
+        {svc.syncRun && <RagicRecovery run={svc.syncRun} />}
         {svc.lastSyncTime && (
           <div className="text-xs text-muted-foreground">
             <span className="font-medium text-foreground">上次同步：</span>

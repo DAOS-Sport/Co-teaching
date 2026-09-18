@@ -7,6 +7,8 @@
  */
 import { and, between, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { db } from "../db";
+import { writeSchedule, removeSchedule, lockScheduleWrites } from "../shared/scheduleMutation";
+import { audit } from "../shared/audit";
 import { addDays, format } from "date-fns";
 import {
   schedules,
@@ -29,6 +31,9 @@ const splitByAnySeparator = (s: string): string[] =>
 
 const scheduleSelect = {
   id: schedules.id,
+  version: schedules.version,
+  coachUserId: schedules.coachUserId,
+  coachUserId2: schedules.coachUserId2,
   date: schedules.date,
   venueId: schedules.venueId,
   timeSlotId: schedules.timeSlotId,
@@ -64,6 +69,7 @@ export class ScheduleRepository {
     commit: boolean;
   }) {
     return db.transaction(async (tx) => {
+      await lockScheduleWrites(tx);
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${input.venueId}:${input.targetStartDate}`}))`);
       const source = await tx.select().from(schedules).where(and(
         eq(schedules.venueId, input.venueId),
@@ -108,7 +114,7 @@ export class ScheduleRepository {
         });
       }
       if (input.commit && planned.length > 0) {
-        await tx.insert(schedules).values(planned);
+        for (const row of planned) await writeSchedule(tx, null, row);
       }
       return {
         sourceCount: source.length,
@@ -168,11 +174,7 @@ export class ScheduleRepository {
   }
 
   async upsertSchedule(schedule: InsertScheduleType): Promise<Schedule> {
-    const [result] = await db
-      .insert(schedules)
-      .values({ ...schedule, updatedAt: new Date() })
-      .returning();
-    return result;
+    return db.transaction(tx => writeSchedule(tx, null, schedule));
   }
 
   async getScheduleById(id: string): Promise<Schedule | undefined> {
@@ -183,35 +185,18 @@ export class ScheduleRepository {
     return result;
   }
 
-  async updateSchedule(
-    id: string,
-    updateData: ScheduleUpdateFields
-  ): Promise<Schedule> {
-    const setData: Record<string, unknown> = { updatedAt: new Date() };
-    if (updateData.className !== undefined) setData.className = updateData.className;
-    if (updateData.coachName !== undefined) setData.coachName = updateData.coachName;
-    if (updateData.coachName2 !== undefined) setData.coachName2 = updateData.coachName2;
-    if (updateData.coachCount !== undefined) setData.coachCount = updateData.coachCount;
-    if (updateData.coach1IsTeaching !== undefined)
-      setData.coach1IsTeaching = updateData.coach1IsTeaching;
-    if (updateData.coach2IsTeaching !== undefined)
-      setData.coach2IsTeaching = updateData.coach2IsTeaching;
-    const [result] = await db
-      .update(schedules)
-      .set(setData)
-      .where(eq(schedules.id, id))
-      .returning();
-    return result;
+  async updateSchedule(id: string, updateData: ScheduleUpdateFields, expectedVersion: number): Promise<Schedule> {
+    return db.transaction(tx => writeSchedule(tx, id, updateData, expectedVersion));
   }
-
-  async deleteSchedule(id: string): Promise<void> {
-    await db.delete(schedules).where(eq(schedules.id, id));
+  async deleteSchedule(id: string, expectedVersion: number): Promise<void> {
+    await db.transaction(tx => removeSchedule(tx, id, expectedVersion));
   }
 
   async getCoachSchedules(
     coachName: string,
     startDate: string,
-    endDate: string
+    endDate: string,
+    coachUserId?: string
   ): Promise<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]> {
     const normalizedCoachName = normalizeString(coachName);
     return await db
@@ -221,7 +206,7 @@ export class ScheduleRepository {
       .innerJoin(timeSlots, eq(schedules.timeSlotId, timeSlots.id))
       .where(
         and(
-          or(
+          coachUserId ? or(eq(schedules.coachUserId, coachUserId), eq(schedules.coachUserId2, coachUserId)) : or(
             eq(schedules.coachName, coachName),
             like(schedules.coachName, `%-${coachName}`),
             like(schedules.coachName, `${coachName}-%`),
@@ -439,6 +424,9 @@ export class ScheduleRepository {
       if (!schedulesMap.has(scheduleId)) {
         schedulesMap.set(scheduleId, {
           id: result.id,
+          version: result.version,
+          coachUserId: result.coachUserId,
+          coachUserId2: result.coachUserId2,
           date: result.date,
           venueId: result.venueId,
           timeSlotId: result.timeSlotId,
@@ -497,48 +485,21 @@ export class ScheduleRepository {
       .orderBy(coachRegistrations.registeredAt);
   }
 
-  async lockSchedules(
-    venueId: string,
-    startDate: string,
-    endDate: string
-  ): Promise<void> {
-    await db
-      .update(schedules)
-      .set({ isClassLocked: true, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schedules.venueId, venueId),
-          between(schedules.date, startDate, endDate)
-        )
-      );
+  async setLocked(venueId: string, startDate: string, endDate: string, locked: boolean): Promise<void> {
+    await db.transaction(async tx => {
+      await lockScheduleWrites(tx);
+      const rows = await tx.select().from(schedules).where(and(eq(schedules.venueId, venueId), between(schedules.date, startDate, endDate))).for("update");
+      for (const before of rows) {
+        const [after] = await tx.update(schedules).set({ isClassLocked: locked, version: before.version + 1, updatedAt: new Date() }).where(eq(schedules.id, before.id)).returning();
+        await audit(tx, "schedule_lock", before.id, before, after);
+      }
+    });
   }
+  async lockSchedules(venueId: string, startDate: string, endDate: string) { return this.setLocked(venueId, startDate, endDate, true); }
+  async unlockSchedules(venueId: string, startDate: string, endDate: string) { return this.setLocked(venueId, startDate, endDate, false); }
 
-  async unlockSchedules(
-    venueId: string,
-    startDate: string,
-    endDate: string
-  ): Promise<void> {
-    await db
-      .update(schedules)
-      .set({ isClassLocked: false, updatedAt: new Date() })
-      .where(
-        and(
-          eq(schedules.venueId, venueId),
-          between(schedules.date, startDate, endDate)
-        )
-      );
-  }
-
-  async assignCoach(
-    scheduleId: string,
-    coachName: string | null
-  ): Promise<Schedule> {
-    const [result] = await db
-      .update(schedules)
-      .set({ coachName, updatedAt: new Date() })
-      .where(eq(schedules.id, scheduleId))
-      .returning();
-    return result;
+  async assignCoach(scheduleId: string, coachName: string | null, expectedVersion: number): Promise<Schedule> {
+    return db.transaction(tx => writeSchedule(tx, scheduleId, { coachName }, expectedVersion));
   }
 
   async getScheduleLockStatus(

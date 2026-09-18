@@ -12,6 +12,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 
 import { setupAuth } from "./replitAuth";
+import { registerAuditContext } from "./shared/auth/auditContext";
 import {
   assertBootConfig,
   runStartupFixes,
@@ -31,6 +32,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // 1. Auth middleware (sessions + Replit OIDC)
   await setupAuth(app);
+  registerAuditContext(app);
 
   // 2. One-time data fixes (idempotent)
   await runStartupFixes();

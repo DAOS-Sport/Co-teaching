@@ -405,16 +405,17 @@ function CoachAssignmentContent() {
 
   const assignCoachMutation = useMutation({
     mutationFn: async ({
-      scheduleId, coachName, coachName2, coach1IsTeaching, coach2IsTeaching,
+      scheduleId, expectedVersion, coachName, coachName2, coach1IsTeaching, coach2IsTeaching,
     }: {
       scheduleId: string;
+      expectedVersion: number;
       coachName?: string;
       coachName2?: string;
       coach1IsTeaching?: boolean;
       coach2IsTeaching?: boolean;
     }) => {
       const adminPassword = sessionStorage.getItem("admin-password") || "";
-      const body: any = {};
+      const body: any = { expectedVersion };
       if (coachName !== undefined) body.coachName = coachName;
       if (coachName2 !== undefined) body.coachName2 = coachName2;
       if (coach1IsTeaching !== undefined) body.coach1IsTeaching = coach1IsTeaching;
@@ -548,7 +549,7 @@ function CoachAssignmentContent() {
         const candidates = scoredCandidates(dayOfWeek, timeSlotOrder, venueName, conflicting);
         if (candidates.length > 0) {
           const best = pickBest(candidates, timeAvailSet)!;
-          assignCoachMutation.mutate({ scheduleId: schedule.id, coachName: best });
+          assignCoachMutation.mutate({ scheduleId: schedule.id, expectedVersion: schedule.version, coachName: best });
           localCounts[best] = (localCounts[best] || 0) + 1;
           assignedCoach1 = best;
           filled++;
@@ -560,7 +561,7 @@ function CoachAssignmentContent() {
         const candidates2 = scoredCandidates(dayOfWeek, timeSlotOrder, venueName, exclude2);
         if (candidates2.length > 0) {
           const best2 = pickBest(candidates2, timeAvailSet)!;
-          assignCoachMutation.mutate({ scheduleId: schedule.id, coachName2: best2 });
+          assignCoachMutation.mutate({ scheduleId: schedule.id, expectedVersion: schedule.version, coachName2: best2 });
           localCounts[best2] = (localCounts[best2] || 0) + 1;
           filled++;
         }
@@ -851,7 +852,7 @@ function CoachAssignmentContent() {
                                       value={schedule.coachName || ""}
                                       onValueChange={(value) => {
                                         assignCoachMutation.mutate({
-                                          scheduleId: schedule.id,
+                                          scheduleId: schedule.id, expectedVersion: schedule.version,
                                           coachName: value === "__clear__" ? "" : value,
                                         });
                                       }}
@@ -866,7 +867,7 @@ function CoachAssignmentContent() {
                                           details,
                                           onConfirm: () =>
                                             assignCoachMutation.mutate({
-                                              scheduleId: schedule.id,
+                                              scheduleId: schedule.id, expectedVersion: schedule.version,
                                               coachName: coach,
                                             }),
                                         })
@@ -883,7 +884,7 @@ function CoachAssignmentContent() {
                                         value={schedule.coach1IsTeaching ? "teaching" : "assist"}
                                         onChange={(e) => {
                                           assignCoachMutation.mutate({
-                                            scheduleId: schedule.id,
+                                            scheduleId: schedule.id, expectedVersion: schedule.version,
                                             coach1IsTeaching: e.target.value === "teaching",
                                           });
                                         }}
@@ -898,7 +899,7 @@ function CoachAssignmentContent() {
                                         value={schedule.coachName2 || ""}
                                         onValueChange={(value) => {
                                           assignCoachMutation.mutate({
-                                            scheduleId: schedule.id,
+                                            scheduleId: schedule.id, expectedVersion: schedule.version,
                                             coachName2: value === "__clear__" ? "" : value,
                                           });
                                         }}
@@ -913,7 +914,7 @@ function CoachAssignmentContent() {
                                             details,
                                             onConfirm: () =>
                                               assignCoachMutation.mutate({
-                                                scheduleId: schedule.id,
+                                                scheduleId: schedule.id, expectedVersion: schedule.version,
                                                 coachName2: coach,
                                               }),
                                           })
@@ -932,7 +933,7 @@ function CoachAssignmentContent() {
                                           value={schedule.coach2IsTeaching ? "teaching" : "assist"}
                                           onChange={(e) => {
                                             assignCoachMutation.mutate({
-                                              scheduleId: schedule.id,
+                                              scheduleId: schedule.id, expectedVersion: schedule.version,
                                               coach2IsTeaching: e.target.value === "teaching",
                                             });
                                           }}

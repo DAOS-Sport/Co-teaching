@@ -65,6 +65,9 @@ export const schedules = pgTable("schedules", {
   className: varchar("class_name"),
   coachName: varchar("coach_name"),
   coachName2: varchar("coach_name_2"),
+  coachUserId: varchar("coach_user_id"),
+  coachUserId2: varchar("coach_user_id_2"),
+  version: integer("version").notNull().default(1),
   coach1IsTeaching: boolean("coach1_is_teaching").notNull().default(true),
   coach2IsTeaching: boolean("coach2_is_teaching").notNull().default(false),
   coachCount: integer("coach_count").notNull().default(1),
@@ -97,6 +100,7 @@ export const coachUsers = pgTable("coach_users", {
   phone: varchar("phone"),
   email: varchar("email"),
   employeeId: varchar("employee_id"), // 員工帳號（從 Ragic 同步）
+  ragicRecordId: varchar("ragic_record_id").unique(),
   status: varchar("status").notNull().default("pending"), // pending / approved / rejected
   role: varchar("role").notNull().default("coach"), // admin / coach
   linkedCoachName: varchar("linked_coach_name"), // 對應排課系統中的教練名稱
@@ -188,23 +192,25 @@ export const venueInfos = pgTable("venue_infos", {
 export const coachVenuePreferences = pgTable("coach_venue_preferences", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   coachName: varchar("coach_name").notNull(),
+  coachUserId: varchar("coach_user_id"),
   venueName: varchar("venue_name").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
-  unique("coach_venue_preferences_coach_name_venue_name_key").on(table.coachName, table.venueName),
+  unique("preferences_coach_id_venue").on(table.coachUserId, table.venueName),
 ]);
 
 export const coachAvailability = pgTable("coach_availability", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   coachName: varchar("coach_name").notNull(),
+  coachUserId: varchar("coach_user_id"),
   weekStart: date("week_start").notNull(),
   dayOfWeek: integer("day_of_week").notNull(),
   timeSlotOrder: integer("time_slot_order").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
 }, (table) => [
   // 名稱明確指定為 DB 既有 constraint（PG 自動截斷至 63 字元，以 _time_s_key 結尾）
-  unique("coach_availability_coach_name_week_start_day_of_week_time_s_key").on(
-    table.coachName,
+  unique("availability_coach_id_slot").on(
+    table.coachUserId,
     table.weekStart,
     table.dayOfWeek,
     table.timeSlotOrder,
@@ -388,6 +394,7 @@ export type VenueInfo = typeof venueInfos.$inferSelect;
 export type InsertVenueInfo = typeof venueInfos.$inferInsert;
 
 export const insertScheduleSchema = createInsertSchema(schedules).omit({
+  version: true,
   id: true,
   createdAt: true,
   updatedAt: true,

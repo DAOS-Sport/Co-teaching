@@ -7,6 +7,8 @@
  */
 import { eq } from "drizzle-orm";
 import { db } from "../db";
+import { lockScheduleWrites } from "../shared/scheduleMutation";
+import { audit, MutationError } from "../shared/audit";
 import {
   venues,
   timeSlots,
@@ -24,28 +26,27 @@ export class VenueRepository {
   }
 
   async createVenue(name: string, color: string): Promise<Venue> {
-    const existing = await this.getVenues();
-    const maxOrder =
-      existing.length > 0 ? Math.max(...existing.map((v) => v.order)) : 0;
-    const [venue] = await db
-      .insert(venues)
-      .values({ name, color, order: maxOrder + 1 })
-      .returning();
-    return venue;
+    return db.transaction(async tx => {
+      await lockScheduleWrites(tx);
+      const existing = await tx.select().from(venues);
+      if (existing.some(v => v.name === name)) throw new MutationError("VENUE_EXISTS");
+      const [venue] = await tx.insert(venues).values({ name, color, order: Math.max(0, ...existing.map(v => v.order)) + 1 }).returning();
+      await audit(tx, "venue", venue.id, null, venue);
+      return venue;
+    });
   }
-
   async deleteVenue(id: string): Promise<void> {
-    const venue = await db.select().from(venues).where(eq(venues.id, id));
-    if (venue.length > 0) {
-      await db
-        .delete(venueInfos)
-        .where(eq(venueInfos.venueName, venue[0].name));
-      await db
-        .delete(coachVenuePreferences)
-        .where(eq(coachVenuePreferences.venueName, venue[0].name));
-    }
-    await db.delete(schedules).where(eq(schedules.venueId, id));
-    await db.delete(venues).where(eq(venues.id, id));
+    await db.transaction(async tx => {
+      await lockScheduleWrites(tx);
+      const [venue] = await tx.select().from(venues).where(eq(venues.id, id)).for("update");
+      if (!venue) throw new MutationError("VENUE_NOT_FOUND", 404);
+      const linked = await tx.select({ id: schedules.id }).from(schedules).where(eq(schedules.venueId, id)).limit(1);
+      if (linked.length) throw new MutationError("VENUE_HAS_SCHEDULE_HISTORY");
+      await tx.delete(venueInfos).where(eq(venueInfos.venueName, venue.name));
+      await tx.delete(coachVenuePreferences).where(eq(coachVenuePreferences.venueName, venue.name));
+      await tx.delete(venues).where(eq(venues.id, id));
+      await audit(tx, "venue", id, venue, null);
+    });
   }
 
   async initializeVenues(): Promise<void> {
@@ -103,7 +104,10 @@ export class VenueRepository {
     description: string | null,
     mapUrl?: string | null
   ): Promise<VenueInfo> {
-    const [result] = await db
+    return db.transaction(async tx => {
+      await lockScheduleWrites(tx);
+      const [before] = await tx.select().from(venueInfos).where(eq(venueInfos.venueName, venueName));
+    const [result] = await tx
       .insert(venueInfos)
       .values({
         venueName,
@@ -122,6 +126,8 @@ export class VenueRepository {
         },
       })
       .returning();
+    await audit(tx, "venue_info", result.id, before, result);
     return result;
+    });
   }
 }

@@ -1,3 +1,4 @@
+import { MutationError } from "../shared/audit";
 import type { Express } from "express";
 import { format, addDays } from "date-fns";
 import { storage } from "../storage";
@@ -29,6 +30,7 @@ export function registerScheduleRoutes(app: Express): void {
       const schedules = await storage.getSchedulesByDateRange(startDate, endDate);
       res.json(schedules);
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
       res.status(500).json({ message: "Failed to fetch schedules" });
     }
   });
@@ -42,6 +44,7 @@ export function registerScheduleRoutes(app: Express): void {
       const schedule = await storage.upsertSchedule(validatedData);
       res.json(schedule);
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
       if (isPgUniqueViolation(error)) {
         return res.status(409).json({
           code: "DUPLICATE_CLASS_IN_CELL",
@@ -71,6 +74,7 @@ export function registerScheduleRoutes(app: Express): void {
       );
       res.json({ isLocked: locked });
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
       res.status(500).json({ message: "Failed to check lock status" });
     }
   });
@@ -102,6 +106,7 @@ export function registerScheduleRoutes(app: Express): void {
         const preview = await previewScheduleImport(input.venueId, input.text, input.mode);
         return res.json(preview);
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
         console.error("Schedule import preview failed:", error);
         return res.status(500).json({ message: "課表匯入預覽失敗" });
       }
@@ -115,7 +120,7 @@ export function registerScheduleRoutes(app: Express): void {
       try {
         const input = readImportRequest(req.body);
         if (!input.ok) return res.status(400).json({ message: input.message });
-        const result = await commitScheduleImport(input.venueId, input.text, input.mode);
+        const result = await commitScheduleImport(input.venueId, input.text, input.mode, req.body.previewToken);
         if (!result.committed) {
           return res.status(409).json({
             message: "資料已變更或仍有錯誤，請重新確認預覽",
@@ -124,6 +129,7 @@ export function registerScheduleRoutes(app: Express): void {
         }
         return res.json(result);
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
         console.error("Schedule import commit failed:", error);
         return res.status(500).json({ message: "課表匯入失敗，未寫入任何資料" });
       }
@@ -152,6 +158,7 @@ export function registerScheduleRoutes(app: Express): void {
         });
         res.json({ success: true, copied: result.committed ? result.plannedCount : 0, ...result });
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
         console.error("Error copying week:", error);
         if (isPgUniqueViolation(error)) {
           return res.status(409).json({ message: "目標週資料已被其他使用者修改，請重新預覽" });
@@ -175,6 +182,7 @@ export function registerScheduleRoutes(app: Express): void {
         await storage.lockSchedules(venueId, startDate, endDate);
         res.json({ success: true });
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
         res.status(500).json({ message: "Failed to lock schedules" });
       }
     }
@@ -195,6 +203,7 @@ export function registerScheduleRoutes(app: Express): void {
         notifyScheduleUnlocked(venueId, startDate, endDate).catch(() => {});
         res.json({ success: true });
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
         res.status(500).json({ message: "Failed to unlock schedules" });
       }
     }
@@ -231,20 +240,20 @@ export function registerScheduleRoutes(app: Express): void {
           if (promoted) Object.assign(updateData, promoted);
           const schedule = await storage.updateSchedule(
             req.params.id,
-            updateData
+            updateData, Number(req.body.expectedVersion)
           );
           return res.json(schedule);
         }
         if (coach1IsTeaching !== undefined) {
           const schedule = await storage.updateSchedule(req.params.id, {
             coach1IsTeaching: !!coach1IsTeaching,
-          });
+          }, Number(req.body.expectedVersion));
           return res.json(schedule);
         }
         if (coach2IsTeaching !== undefined) {
           const schedule = await storage.updateSchedule(req.params.id, {
             coach2IsTeaching: !!coach2IsTeaching,
-          });
+          }, Number(req.body.expectedVersion));
           return res.json(schedule);
         }
         // Clearing slot 1 must not strand a coach in slot 2 — promote them.
@@ -255,10 +264,11 @@ export function registerScheduleRoutes(app: Express): void {
           coach2IsTeaching: !!existing.coach2IsTeaching,
         });
         const schedule = promoted
-          ? await storage.updateSchedule(req.params.id, promoted)
-          : await storage.assignCoach(req.params.id, coachName || null);
+          ? await storage.updateSchedule(req.params.id, promoted, Number(req.body.expectedVersion))
+          : await storage.assignCoach(req.params.id, coachName || null, Number(req.body.expectedVersion));
         res.json(schedule);
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
         res.status(500).json({ message: "Failed to assign coach" });
       }
     }
@@ -283,9 +293,10 @@ export function registerScheduleRoutes(app: Express): void {
           coach2IsTeaching: !!existing.coach2IsTeaching,
         });
         if (promoted) Object.assign(updateData, promoted);
-        const schedule = await storage.updateSchedule(req.params.id, updateData);
+        const schedule = await storage.updateSchedule(req.params.id, updateData, Number(req.body.expectedVersion));
         res.json(schedule);
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
         if (isPgUniqueViolation(error)) {
           return res.status(409).json({ code: "DUPLICATE_CLASS_IN_CELL", message: "此時段已經有相同班級" });
         }
@@ -347,10 +358,11 @@ export function registerScheduleRoutes(app: Express): void {
         if (promoted) Object.assign(updateData, promoted);
         const schedule = await storage.updateSchedule(
           req.params.id,
-          updateData
+          updateData, Number(req.body.expectedVersion)
         );
         res.json(schedule);
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
         if (isPgUniqueViolation(error)) {
           return res.status(409).json({ code: "DUPLICATE_CLASS_IN_CELL", message: "此時段已經有相同班級" });
         }
@@ -370,9 +382,10 @@ export function registerScheduleRoutes(app: Express): void {
             .status(409)
             .json({ message: "課表已鎖定，請先解鎖該週才能刪除" });
         }
-        await storage.deleteSchedule(req.params.id);
+        await storage.deleteSchedule(req.params.id, Number(req.body?.expectedVersion));
         res.json({ success: true });
       } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
         res.status(500).json({ message: "Failed to delete schedule" });
       }
     }
@@ -392,6 +405,7 @@ export function registerScheduleRoutes(app: Express): void {
       const result = await storage.getVacantSchedules(venueId, startDate, endDate);
       res.json(result);
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
       res.status(500).json({ message: "Failed to fetch vacant schedules" });
     }
   });
@@ -404,6 +418,7 @@ export function registerScheduleRoutes(app: Express): void {
       const schedules = await storage.getSchedulesByDate(date);
       res.json(schedules);
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
       res.status(500).json({ message: "Failed to fetch schedules" });
     }
   });
@@ -415,6 +430,7 @@ export function registerScheduleRoutes(app: Express): void {
       const conflicts = await storage.getConflicts(date);
       res.json(conflicts);
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
       res.status(500).json({ message: "Failed to fetch conflicts" });
     }
   });
@@ -434,6 +450,7 @@ export function registerScheduleRoutes(app: Express): void {
       );
       res.json(statistics);
     } catch (error) {
+      if (error instanceof MutationError) return res.status(error.status).json({ code: error.code, message: error.code === "VERSION_CONFLICT" ? "課表已被修改，請重新載入後再儲存" : error.code });
       res.status(500).json({ message: "Failed to fetch statistics" });
     }
   });
