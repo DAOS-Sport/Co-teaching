@@ -9,7 +9,7 @@
     "start": "NODE_ENV=production node dist/index.js",
     "mcp:claude": "tsx server/mcp/claudeWorkspaceMcp.mjs",
     "check": "tsc",
-    "test": "node --import tsx --test shared/scheduleImport.test.ts shared/scheduleRules.test.ts client/src/utils/special-workdays.test.ts server/shared/auth/teacherTokenCodec.test.ts server/ragic.test.ts",
+    "test": "node --import tsx --test shared/scheduleImport.test.ts shared/scheduleRules.test.ts client/src/utils/special-workdays.test.ts server/shared/auth/teacherTokenCodec.test.ts server/ragic.test.ts server/issue-regression.test.ts",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {

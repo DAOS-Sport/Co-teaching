@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { storage } from "../storage";
 import { consumeLineLoginToken } from "./auth.routes";
 import { env } from "../config/env";
-import { fetchWithTimeout } from "../shared/http/fetchWithTimeout";
+import { notifyCoachNotFound, coachNotFoundMessage } from "./notification/coachNotFound";
 import {
   issueCoachSessionToken,
   readCoachSessionToken,
@@ -99,49 +99,12 @@ export function registerCoachPortalRoutes(app: Express): void {
         return res.json({ ...updated, coachToken });
       }
 
-      // Not found in DB → notify the admin alert LINE user via push.
-      // Recipient is configured via ADMIN_ALERT_LINE_USER_ID; when unset
-      // we downgrade to a console.warn rather than push to a stale id.
-      const channelAccessToken = env.lineChannelAccessToken;
-      const adminAlertId = env.adminAlertLineUserId;
-      if (!adminAlertId) {
-        console.warn(
-          `[coach-portal] Coach "${trimmedName}" not found and ADMIN_ALERT_LINE_USER_ID is not set — skipping LINE notification`,
-        );
-      }
-      if (channelAccessToken && adminAlertId) {
-        // Task #32: timeout-bounded; never let a stalled LINE call hold
-        // the registration response open.
-        const notifyResult = await fetchWithTimeout(
-          "https://api.line.me/v2/bot/message/push",
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${channelAccessToken}`,
-            },
-            body: JSON.stringify({
-              to: adminAlertId,
-              messages: [
-                {
-                  type: "text",
-                  text: `【教練登入通知】\n教練「${trimmedName}」嘗試登入教練前台，但在 Ragic 資料庫中查無此名字。\n請確認該教練是否已建檔，或協助手動設定。`,
-                },
-              ],
-            }),
-          },
-        );
-        if (!notifyResult.ok) {
-          console.error(
-            `[LINE] Failed to notify admin alert user: status=${notifyResult.status} ` +
-              `code=${notifyResult.errorCode} msg=${notifyResult.errorMessage ?? ""}`,
-          );
-        }
-      }
-
-      return res.status(404).json({
-        message: `查無「${trimmedName}」的教練資料，已通知管理員，請稍候或聯繫陳柏榮。`,
+      const notification = await notifyCoachNotFound(trimmedName, {
+        token: env.lineChannelAccessToken,
+        recipient: env.adminAlertLineUserId,
       });
+      console.info(JSON.stringify({ event: "coach_not_found_notification", ...notification }));
+      return res.status(404).json({ message: coachNotFoundMessage(notification), notification });
     } catch (error) {
       console.error("Error linking by name:", error);
       res.status(500).json({ message: "連結失敗" });

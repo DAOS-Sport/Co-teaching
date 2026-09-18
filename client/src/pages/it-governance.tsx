@@ -11,7 +11,9 @@ interface ServiceStatus {
   description: string;
   enabled: boolean;
   configured: boolean;
-  status: "ok" | "disabled" | "misconfigured";
+  status: "ok" | "disabled" | "misconfigured" | "error" | "timeout" | "unknown";
+  checkedAt?: string;
+  code?: string;
   endpoints?: string[];
   lastSyncTime?: string | null;
   isSyncing?: boolean;
@@ -58,7 +60,10 @@ const AUTH_LABELS: Record<string, { label: string; color: string }> = {
 };
 
 const STATUS_CONFIG = {
-  ok: { label: "正常", icon: "fa-circle-check", color: "text-green-600" },
+  error: { label: "異常", icon: "fa-circle-exclamation", color: "text-red-600" },
+  timeout: { label: "連線逾時", icon: "fa-clock", color: "text-red-600" },
+  unknown: { label: "尚未驗證", icon: "fa-circle-question", color: "text-amber-500" },
+  ok: { label: "連線正常", icon: "fa-circle-check", color: "text-green-600" },
   disabled: { label: "已停用", icon: "fa-circle-minus", color: "text-gray-400" },
   misconfigured: { label: "未設定", icon: "fa-circle-exclamation", color: "text-amber-500" },
 };
@@ -78,6 +83,8 @@ function ServiceCard({ svc }: { svc: ServiceStatus }) {
         <p className="text-xs text-muted-foreground mt-0.5">{svc.description}</p>
       </CardHeader>
       <CardContent className="px-4 pb-3 space-y-2">
+        {svc.checkedAt && <p className="text-xs text-muted-foreground">檢查時間：{new Date(svc.checkedAt).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" })}（台北）</p>}
+        {svc.code && <p className="text-xs text-muted-foreground">{svc.code}</p>}
         {svc.lastSyncTime && (
           <div className="text-xs text-muted-foreground">
             <span className="font-medium text-foreground">上次同步：</span>

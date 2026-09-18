@@ -3,10 +3,17 @@ import { requireAdminPassword } from "../shared/auth/adminPassword";
 import { getRagicSyncStatus } from "../ragic";
 import { featureFlags } from "../config/featureFlags";
 import { env } from "../config/env";
+import { probeHttpService } from "../shared/serviceHealth";
 
 export function registerItGovernanceRoutes(app: Express): void {
   app.get("/api/admin/it-governance", requireAdminPassword, async (_req, res) => {
     const ragic = getRagicSyncStatus();
+    const [lineHealth, ragicHealth] = await Promise.all([
+      probeHttpService({ enabled: featureFlags.enableLineNotify, configured: !!env.lineChannelAccessToken,
+        kind: "line", url: "https://api.line.me/v2/bot/info", headers: { Authorization: `Bearer ${env.lineChannelAccessToken}` } }),
+      probeHttpService({ enabled: featureFlags.enableRagicSync, configured: !!env.ragicApiKey,
+        kind: "ragic", url: `https://ap7.ragic.com/xinsheng/ragicforms4/7?api&limit=1&APIKey=${encodeURIComponent(env.ragicApiKey ?? "")}`, lastError: ragic.lastError }),
+    ]);
 
     const services = [
       {
@@ -15,7 +22,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         description: "每週課表推播 & 每日提醒，透過 LINE Messaging API 傳送給教練",
         enabled: featureFlags.enableLineNotify,
         configured: !!(env.lineChannelAccessToken),
-        status: featureFlags.enableLineNotify && env.lineChannelAccessToken ? "ok" : !env.lineChannelAccessToken ? "misconfigured" : "disabled",
+        ...lineHealth,
         endpoints: [
           "POST /api/admin/notify-daily",
           "POST /api/admin/send-fill-reminder",
@@ -29,7 +36,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         description: "每日 03:00 自動從 Ragic 同步部門、教練姓名、LINE ID 及員工編號",
         enabled: featureFlags.enableRagicSync,
         configured: !!env.ragicApiKey,
-        status: featureFlags.enableRagicSync && env.ragicApiKey ? "ok" : !env.ragicApiKey ? "misconfigured" : "disabled",
+        ...ragicHealth,
         lastSyncTime: ragic.lastSyncTime,
         isSyncing: ragic.isSyncing,
         lastSyncResult: ragic.lastSyncResult,
@@ -44,7 +51,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         description: "以 pg-boss 佇列驅動的週推播，支援乾跑模式、CSV 報告、重試機制",
         enabled: featureFlags.enableWeeklyPushQueue,
         configured: featureFlags.enableWeeklyPushQueue,
-        status: featureFlags.enableWeeklyPushQueue ? "ok" : "disabled",
+        status: featureFlags.enableWeeklyPushQueue ? "unknown" : "disabled",
         endpoints: [
           "POST /api/admin/weekly-push/enqueue",
           "GET /api/admin/weekly-push/runs",
@@ -59,7 +66,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         description: "教練前台透過 LINE OAuth 登入，取得 30 天 session token",
         enabled: true,
         configured: !!(env.lineChannelId && env.lineChannelSecret),
-        status: env.lineChannelId && env.lineChannelSecret ? "ok" : "misconfigured",
+        status: env.lineChannelId && env.lineChannelSecret ? "unknown" : "misconfigured",
         endpoints: [
           "GET /api/auth/line",
           "GET /api/auth/line/callback",
@@ -72,7 +79,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         description: "支援多個學校獨立 schema，教師回饋與課表管理",
         enabled: featureFlags.enableSchoolModule,
         configured: featureFlags.enableSchoolModule,
-        status: featureFlags.enableSchoolModule ? "ok" : "disabled",
+        status: featureFlags.enableSchoolModule ? "unknown" : "disabled",
         endpoints: [
           "GET /api/:schoolCode/schedules",
           "GET /api/:schoolCode/teachers",
