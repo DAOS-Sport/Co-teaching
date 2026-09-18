@@ -7,7 +7,7 @@ interface WeekConflictAlertProps {
 }
 
 export default function WeekConflictAlert({ weekStart }: WeekConflictAlertProps) {
-  const weekDays = Array.from({ length: 5 }, (_, i) => addDays(weekStart, i));
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
   
   const conflictQueries = weekDays.map(day => 
     useQuery<{ coachName: string; timeSlotId: string; venues: string[] }[]>({
@@ -23,7 +23,7 @@ export default function WeekConflictAlert({ weekStart }: WeekConflictAlertProps)
   const allConflicts = conflictQueries.flatMap((query, dayIndex) => 
     (query.data || []).map(conflict => ({
       ...conflict,
-      dayName: ['星期一', '星期二', '星期三', '星期四', '星期五'][dayIndex],
+      dayName: ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'][dayIndex],
       date: format(weekDays[dayIndex], 'M月d日')
     }))
   );

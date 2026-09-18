@@ -34,7 +34,7 @@ export default function FloatingConflictAlert({ weekStart }: FloatingConflictAle
     return null;
   }
   
-  const weekDays = Array.from({ length: 5 }, (_, i) => addDays(weekStart, i));
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
   
   const conflictQueries = useQueries({
     queries: weekDays.map(day => ({
@@ -49,7 +49,7 @@ export default function FloatingConflictAlert({ weekStart }: FloatingConflictAle
   const allConflicts = conflictQueries.flatMap((query, dayIndex) => 
     ((query.data as { coachName: string; timeSlotId: string; venues: string[] }[]) || []).map(conflict => ({
       ...conflict,
-      dayName: ['星期一', '星期二', '星期三', '星期四', '星期五'][dayIndex],
+      dayName: ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'][dayIndex],
       date: format(weekDays[dayIndex], 'M月d日')
     }))
   );

@@ -18,14 +18,12 @@ import {
   initializeAppData,
 } from "./infra/startup";
 import { registerAllModules } from "./modules/_registry";
-import {
-  setupWeeklyNotificationCron,
-  setupDailyNotificationCron,
-} from "./line-notify";
+import { setupDailyNotificationCron } from "./line-notify";
 import { setupRagicSyncCron } from "./ragic";
 import { startWeeklyPushQueue } from "./infra/startup";
 import { featureFlags } from "./config/featureFlags";
 import { setupReportCleanupCron } from "./modules/weeklyPush/weeklyPush.cleanup";
+import { registerRemoteMcpRoutes } from "./mcp/remoteMcp.routes";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // 0. Fail fast on missing config (esp. ADMIN_PASSWORD in production)
@@ -42,19 +40,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // 4. All feature modules
   registerAllModules(app);
+  registerRemoteMcpRoutes(app);
 
   // 5. Background jobs (gated by feature flags)
   if (featureFlags.enableLineNotify) {
-    // The legacy node-cron weekly path is suppressed once the new
-    // pg-boss queue is enabled — they would otherwise both fire
-    // on Sunday 20:00 TST and double-push every coach.
-    if (!featureFlags.enableWeeklyPushQueue) {
-      setupWeeklyNotificationCron();
-    } else {
-      console.log(
-        "[boot] legacy weekly cron skipped — pg-boss weekly-push queue is enabled",
-      );
-    }
+    // Weekly delivery is exclusively owned by the pg-boss pipeline.
+    // The legacy weekly cron must never be registered, even when the
+    // new queue is disabled. Daily reminders remain on the legacy path.
     setupDailyNotificationCron();
   }
   if (featureFlags.enableRagicSync) {

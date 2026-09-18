@@ -80,6 +80,10 @@ function computeOrchestratorMaxWaitMs(recipientCount: number): number {
 
 let workersRegistered = false;
 
+export function areWeeklyPushWorkersReady(): boolean {
+  return workersRegistered;
+}
+
 interface RecipientPayload {
   message: string;
   scheduleCount: number;
@@ -107,7 +111,7 @@ async function waitForRecipientsToFinish(
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     const counts = await weeklyPushRepo.countRecipientStatuses(runId);
-    if (counts.pending === 0) {
+    if (counts.pending + counts.sending + counts.retryWait === 0) {
       return { pendingDrained: true, waitedMs: Date.now() - start };
     }
     await new Promise((r) => setTimeout(r, ORCHESTRATOR_POLL_MS));
@@ -129,10 +133,11 @@ async function handleWeeklyPushJob(
       await pingFail(`run ${runId} not found`);
       continue;
     }
+    if (run.status === "cancelled") continue;
 
     try {
       await weeklyPushRepo.updateRun(runId, {
-        status: "running",
+        status: "preparing",
         startedAt: new Date(),
       });
 
@@ -150,6 +155,7 @@ async function handleWeeklyPushJob(
           `[weeklyPush.worker] DRY-RUN runId=${runId} skipping ${recipients.length} recipients`,
         );
       } else {
+        await weeklyPushRepo.updateRun(runId, { status: "sending" });
         // Wet-run: fan out one job per pending recipient.
         const pending = recipients.filter((r) => r.status === "pending");
         for (const r of pending) {
@@ -171,13 +177,14 @@ async function handleWeeklyPushJob(
       // (or partial_failed, which implies completion) while work remains
       // in flight; that would lie in the CSV/summary/Healthchecks ping.
       const counts = await weeklyPushRepo.countRecipientStatuses(runId);
-      let finalStatus: "success" | "partial_failed" | "failed";
+      let finalStatus: "success" | "partial_success" | "failed";
       let runErrorMessage: string | null = null;
 
-      if (counts.pending > 0) {
+      const unsettled = counts.pending + counts.sending + counts.retryWait;
+      if (unsettled > 0) {
         finalStatus = "failed";
         runErrorMessage =
-          `orchestrator_timeout: ${counts.pending}/${counts.total} ` +
+          `orchestrator_timeout: ${unsettled}/${counts.total} ` +
           `recipient(s) still pending after ${waitedMs}ms ` +
           `(maxWaitMs=${maxWaitMs})`;
       } else if (counts.failed === 0) {
@@ -185,7 +192,7 @@ async function handleWeeklyPushJob(
       } else if (counts.success === 0 && counts.skipped === 0) {
         finalStatus = "failed";
       } else {
-        finalStatus = "partial_failed";
+        finalStatus = "partial_success";
       }
 
       await weeklyPushRepo.updateRun(runId, {
@@ -274,7 +281,7 @@ async function handleRecipientJob(
     // Only `pending` (incl. mid-retry) is actionable. Anything else means
     // a previous attempt already settled the row — idempotent skip so a
     // pg-boss redelivery doesn't double-send a successful message.
-    if (recipient.status !== "pending") {
+    if (!["pending", "retry_wait", "sending"].includes(recipient.status)) {
       continue;
     }
 
@@ -299,13 +306,25 @@ async function handleRecipientJob(
       continue;
     }
 
-    const result = await sendTextMessage(recipient.lineUserId, payload.message);
+    await weeklyPushRepo.updateRecipient(recipientId, {
+      status: "sending",
+      attemptCount: attemptNumber,
+      startedAt: new Date(),
+    });
+
+    const result = await sendTextMessage(
+      recipient.lineUserId,
+      payload.message,
+      recipient.lineRetryKey,
+    );
 
     if (result.ok) {
       await weeklyPushRepo.updateRecipient(recipientId, {
         status: "success",
         attemptCount: attemptNumber,
         sentAt: new Date(),
+        completedAt: new Date(),
+        lineResponseCode: result.status,
         errorCode: null,
         errorMessage: null,
       });
@@ -325,6 +344,8 @@ async function handleRecipientJob(
         attemptCount: attemptNumber,
         errorCode: result.errorCode,
         errorMessage: result.errorMessage,
+        completedAt: new Date(),
+        lineResponseCode: result.status,
       });
       // Don't throw — accept the failure as final so pg-boss marks the job complete.
       continue;
@@ -333,10 +354,14 @@ async function handleRecipientJob(
     // Transient failure — keep status='pending', persist the latest error
     // for visibility, and THROW so pg-boss applies its retry policy.
     await weeklyPushRepo.updateRecipient(recipientId, {
-      status: "pending",
+      status: "retry_wait",
       attemptCount: attemptNumber,
       errorCode: result.errorCode,
       errorMessage: result.errorMessage,
+      lineResponseCode: result.status,
+      nextRetryAt: new Date(
+        Date.now() + RECIPIENT_RETRY_DELAY_SECONDS * 1_000 * 2 ** (attemptNumber - 1),
+      ),
     });
     throw new Error(
       `recipient ${recipientId} send failed (attempt ${attemptNumber}/${
@@ -384,7 +409,7 @@ export async function startWeeklyPushWorkers(): Promise<void> {
   );
   await boss.work<WeeklyPushRecipientJobData>(
     queues.weeklyPushRecipient,
-    { batchSize: 4, includeMetadata: true },
+    { batchSize: 1, includeMetadata: true },
     handleRecipientJob,
   );
   await boss.work<WeeklyPushReportJobData>(

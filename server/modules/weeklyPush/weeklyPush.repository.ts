@@ -11,6 +11,7 @@ import { db } from "../../db";
 import {
   weeklyPushRuns,
   weeklyPushRecipients,
+  weeklyPushOutbox,
   type WeeklyPushRun,
   type WeeklyPushRecipient,
   type InsertWeeklyPushRun,
@@ -22,10 +23,77 @@ import type {
 } from "./types";
 
 export const weeklyPushRepo = {
+  async createRunBundle(
+    runInput: InsertWeeklyPushRun,
+    recipientInputs: InsertWeeklyPushRecipient[],
+    queueName: string,
+  ): Promise<{ run: WeeklyPushRun; created: boolean; recipientsCreated: number }> {
+    return db.transaction(async (tx) => {
+      const [run] = await tx.insert(weeklyPushRuns).values(runInput).onConflictDoNothing().returning();
+      if (!run) {
+        const [existing] = await tx.select().from(weeklyPushRuns)
+          .where(eq(weeklyPushRuns.idempotencyKey, runInput.idempotencyKey!)).limit(1);
+        if (!existing) throw new Error("weekly run conflict without persisted winner");
+        return { run: existing, created: false, recipientsCreated: 0 };
+      }
+      const recipients = recipientInputs.length
+        ? await tx.insert(weeklyPushRecipients).values(recipientInputs).returning()
+        : [];
+      await tx.update(weeklyPushRuns).set({
+        totalCount: recipients.length,
+        skippedCount: run.dryRun ? recipients.length : 0,
+        updatedAt: new Date(),
+      }).where(eq(weeklyPushRuns.id, run.id));
+      await tx.insert(weeklyPushOutbox).values({
+        runId: run.id,
+        queueName,
+        payloadJson: { runId: run.id },
+        status: "pending",
+      });
+      return {
+        run: { ...run, totalCount: recipients.length, skippedCount: run.dryRun ? recipients.length : 0 },
+        created: true,
+        recipientsCreated: recipients.length,
+      };
+    });
+  },
+
+  async listPendingOutbox(limit = 50) {
+    return db.select().from(weeklyPushOutbox)
+      .where(inArray(weeklyPushOutbox.status, ["pending", "failed"]))
+      .orderBy(weeklyPushOutbox.createdAt).limit(limit);
+  },
+
+  async markOutboxPublished(id: string) {
+    await db.update(weeklyPushOutbox).set({
+      status: "published", publishedAt: new Date(), updatedAt: new Date(), lastError: null,
+    }).where(eq(weeklyPushOutbox.id, id));
+  },
+
+  async markOutboxFailed(id: string, attemptCount: number, lastError: string) {
+    await db.update(weeklyPushOutbox).set({
+      status: "failed", attemptCount, lastError,
+      nextAttemptAt: new Date(Date.now() + Math.min(300, 2 ** attemptCount) * 1000),
+      updatedAt: new Date(),
+    }).where(eq(weeklyPushOutbox.id, id));
+  },
   // ── runs ─────────────────────────────────────────────────────────
-  async createRun(input: InsertWeeklyPushRun): Promise<WeeklyPushRun> {
-    const [row] = await db.insert(weeklyPushRuns).values(input).returning();
-    return row;
+  async createRun(input: InsertWeeklyPushRun): Promise<WeeklyPushRun | null> {
+    const [row] = await db
+      .insert(weeklyPushRuns)
+      .values(input)
+      .onConflictDoNothing()
+      .returning();
+    return row ?? null;
+  },
+
+  async getRunByIdempotencyKey(key: string): Promise<WeeklyPushRun | null> {
+    const [row] = await db
+      .select()
+      .from(weeklyPushRuns)
+      .where(eq(weeklyPushRuns.idempotencyKey, key))
+      .limit(1);
+    return row ?? null;
   },
 
   async getRunById(id: string): Promise<WeeklyPushRun | null> {
@@ -76,6 +144,11 @@ export const weeklyPushRepo = {
       .limit(Math.min(Math.max(limit, 1), 200));
   },
 
+  async listRunsByStatuses(statuses: WeeklyPushRunStatus[]): Promise<WeeklyPushRun[]> {
+    if (statuses.length === 0) return [];
+    return db.select().from(weeklyPushRuns).where(inArray(weeklyPushRuns.status, statuses));
+  },
+
   async updateRun(
     id: string,
     patch: Partial<{
@@ -88,6 +161,7 @@ export const weeklyPushRepo = {
       skippedCount: number;
       reportPath: string | null;
       errorMessage: string | null;
+      destination: string;
     }>,
   ): Promise<WeeklyPushRun | null> {
     const [row] = await db
@@ -137,6 +211,14 @@ export const weeklyPushRepo = {
       );
   },
 
+  async listStuckSendingRecipients(runId: string, cutoff: Date): Promise<WeeklyPushRecipient[]> {
+    return db.select().from(weeklyPushRecipients).where(and(
+      eq(weeklyPushRecipients.runId, runId),
+      eq(weeklyPushRecipients.status, "sending"),
+      lt(weeklyPushRecipients.updatedAt, cutoff),
+    ));
+  },
+
   async updateRecipient(
     id: string,
     patch: Partial<{
@@ -145,6 +227,10 @@ export const weeklyPushRepo = {
       sentAt: Date | null;
       errorCode: string | null;
       errorMessage: string | null;
+      startedAt: Date | null;
+      completedAt: Date | null;
+      nextRetryAt: Date | null;
+      lineResponseCode: number | null;
     }>,
   ): Promise<WeeklyPushRecipient | null> {
     const [row] = await db
@@ -153,6 +239,18 @@ export const weeklyPushRepo = {
       .where(eq(weeklyPushRecipients.id, id))
       .returning();
     return row ?? null;
+  },
+
+  async cancelUnsentRecipients(runId: string): Promise<number> {
+    const rows = await db
+      .update(weeklyPushRecipients)
+      .set({ status: "cancelled", completedAt: new Date(), updatedAt: new Date() })
+      .where(and(
+        eq(weeklyPushRecipients.runId, runId),
+        inArray(weeklyPushRecipients.status, ["pending", "retry_wait"]),
+      ))
+      .returning({ id: weeklyPushRecipients.id });
+    return rows.length;
   },
 
   /**
@@ -178,6 +276,8 @@ export const weeklyPushRepo = {
 
   async countRecipientStatuses(runId: string): Promise<{
     pending: number;
+    sending: number;
+    retryWait: number;
     success: number;
     failed: number;
     skipped: number;
@@ -190,10 +290,12 @@ export const weeklyPushRepo = {
       .from(weeklyPushRecipients)
       .where(eq(weeklyPushRecipients.runId, runId));
 
-    const acc = { pending: 0, success: 0, failed: 0, skipped: 0, total: rows.length };
+    const acc = { pending: 0, sending: 0, retryWait: 0, success: 0, failed: 0, skipped: 0, total: rows.length };
     for (const r of rows) {
       const s = r.status as WeeklyPushRecipientStatus;
       if (s === "pending") acc.pending += 1;
+      else if (s === "sending") acc.sending += 1;
+      else if (s === "retry_wait") acc.retryWait += 1;
       else if (s === "success") acc.success += 1;
       else if (s === "failed") acc.failed += 1;
       else if (s === "skipped") acc.skipped += 1;

@@ -287,7 +287,7 @@ export default function FindCoach() {
                 <i className="fas fa-chevron-left text-xs sm:text-sm"></i>
               </Button>
               <h2 className="text-sm sm:text-lg font-semibold text-center flex-1 sm:flex-none" data-testid="text-current-week">
-                {format(currentWeek, 'yyyy年M月d日', { locale: zhTW })} - {format(addDays(currentWeek, 4), 'M月d日', { locale: zhTW })}
+                {format(currentWeek, 'yyyy年M月d日', { locale: zhTW })} - {format(addDays(currentWeek, 6), 'M月d日', { locale: zhTW })}
               </h2>
               <Button
                 variant="ghost"

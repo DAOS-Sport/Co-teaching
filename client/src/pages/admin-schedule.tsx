@@ -58,7 +58,7 @@ export default function AdminSchedule() {
     }
   };
 
-  const weekDays = Array.from({ length: 5 }, (_, i) => {
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
     const day = addDays(currentWeek, i);
     return {
       value: i.toString(),
@@ -179,7 +179,7 @@ export default function AdminSchedule() {
                 <i className="fas fa-chevron-left text-xs sm:text-sm"></i>
               </Button>
               <h2 className="text-sm sm:text-lg font-semibold text-center flex-1 sm:flex-none" data-testid="text-current-week">
-                {format(currentWeek, 'yyyy年M月d日', { locale: zhTW })} - {format(addDays(currentWeek, 4), 'M月d日', { locale: zhTW })}
+                {format(currentWeek, 'yyyy年M月d日', { locale: zhTW })} - {format(addDays(currentWeek, 6), 'M月d日', { locale: zhTW })}
               </h2>
               <Button
                 variant="ghost"

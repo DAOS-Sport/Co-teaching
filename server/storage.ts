@@ -68,6 +68,7 @@ export interface IStorage {
     endDate: string
   ): Promise<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]>;
   upsertSchedule(schedule: InsertScheduleType): Promise<Schedule>;
+  copyWeekIntoEmptyCells(input: Parameters<ScheduleRepository["copyWeekIntoEmptyCells"]>[0]): ReturnType<ScheduleRepository["copyWeekIntoEmptyCells"]>;
   updateSchedule(id: string, updateData: ScheduleUpdateFields): Promise<Schedule>;
   deleteSchedule(id: string): Promise<void>;
   getCoachSchedules(
@@ -235,6 +236,8 @@ export class DatabaseStorage implements IStorage {
     this.scheduleRepo.getVacantSchedules(venueId, startDate, endDate);
   upsertSchedule = (schedule: InsertScheduleType) =>
     this.scheduleRepo.upsertSchedule(schedule);
+  copyWeekIntoEmptyCells = (input: Parameters<ScheduleRepository["copyWeekIntoEmptyCells"]>[0]) =>
+    this.scheduleRepo.copyWeekIntoEmptyCells(input);
   getScheduleById = (id: string) => this.scheduleRepo.getScheduleById(id);
   updateSchedule = (id: string, updateData: ScheduleUpdateFields) =>
     this.scheduleRepo.updateSchedule(id, updateData);

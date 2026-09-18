@@ -223,6 +223,7 @@ export async function initializeSchoolSchema(schoolCode: string) {
       CREATE TABLE IF NOT EXISTS ${schemaIdent}.teacher_feedbacks (
         id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
         schedule_id VARCHAR NOT NULL,
+        teacher_id VARCHAR,
         teacher_name VARCHAR NOT NULL,
         status VARCHAR NOT NULL,
         reschedule_date DATE,
@@ -232,6 +233,22 @@ export async function initializeSchoolSchema(schoolCode: string) {
         FOREIGN KEY (schedule_id) REFERENCES ${schemaIdent}.schedules(id) ON DELETE CASCADE,
         UNIQUE (schedule_id, teacher_name)
       );
+    `);
+    await mainDb.execute(sql`
+      ALTER TABLE ${schemaIdent}.teacher_feedbacks
+      ADD COLUMN IF NOT EXISTS teacher_id VARCHAR;
+    `);
+    await mainDb.execute(sql`
+      UPDATE ${schemaIdent}.teacher_feedbacks feedback
+      SET teacher_id = teacher.id
+      FROM ${schemaIdent}.teachers teacher
+      WHERE feedback.teacher_id IS NULL
+        AND feedback.teacher_name = teacher.teacher_name;
+    `);
+    await mainDb.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS teacher_feedbacks_schedule_teacher_id_unique
+      ON ${schemaIdent}.teacher_feedbacks (schedule_id, teacher_id)
+      WHERE teacher_id IS NOT NULL;
     `);
 
     // 為示範學校添加課表資料（只在demo時執行）
@@ -333,6 +350,17 @@ export function getAvailableSchools(): string[] {
   // 這裡可以從配置文件或環境變數中讀取
   // 暫時回傳示例學校列表
   return ['demo', 'school1', 'school2'];
+}
+
+const SCHOOL_NAMES: Record<string, string> = {
+  demo: "新北高中",
+  school1: "學校一",
+  school2: "學校二",
+};
+
+export function getSchoolPublicInfo(schoolCode: string): { code: string; name: string } {
+  assertSchoolCode(schoolCode);
+  return { code: schoolCode, name: SCHOOL_NAMES[schoolCode] ?? schoolCode };
 }
 
 /**

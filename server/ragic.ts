@@ -1,6 +1,16 @@
-import cron from 'node-cron';
+import cron from "node-cron";
 import { storage } from "./storage";
 import { fetchWithTimeout } from "./shared/http/fetchWithTimeout";
+import {
+  type RagicRecord,
+  decideVenue,
+  field,
+  indexCoachUsersByLineId,
+  indexCoachUsersByName,
+  isCoachRole,
+  normalizeLineId,
+  parseRagicBody,
+} from "./ragic.logic";
 
 const RAGIC_DEPT_API_URL = "https://ap7.ragic.com/xinsheng/ragicforms4/7";
 const RAGIC_COACH_API_URL = "https://ap7.ragic.com/xinsheng/general-information/23";
@@ -8,39 +18,41 @@ const RAGIC_EMPLOYEE_API_URL = "https://ap7.ragic.com/xinsheng/ragicforms4/20004
 
 const VENUE_COLORS = ["blue", "green", "purple", "yellow", "orange", "teal", "red", "pink"];
 
-let lastSyncTime: string | null = null;
-let lastSyncResult: {
+const EXCLUDED_NAMES: ReadonlySet<string> = new Set(["(測試帳號)教練"]);
+
+// The boot sync used to fire the instant routes were registered — three
+// Ragic exports plus DB writes while the deployment healthcheck was
+// hammering "/" on a freshly restarted VM. Give the process time to settle.
+const BOOT_SYNC_DELAY_MS = 45_000;
+const BOOT_RETRY_DELAYS_MS = [5 * 60_000, 15 * 60_000]; // 5 min, 15 min
+
+interface SyncResult {
   venues: { added: string[]; updated: string[]; total: number };
   coaches: { added: number; total: number; lineIdsSynced: number; employeeIdsSynced: number };
-} | null = null;
+}
+
+let lastSyncTime: string | null = null;
+let lastSyncResult: SyncResult | null = null;
+let lastError: { at: string; message: string } | null = null;
 let isSyncing = false;
 
 export function getRagicSyncStatus() {
-  return {
-    lastSyncTime,
-    lastSyncResult,
-    isSyncing,
-  };
+  return { lastSyncTime, lastSyncResult, isSyncing, lastError };
 }
 
-interface RagicRecord {
-  _ragicId: number;
-  [key: string]: any;
-}
+const errMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * Returns true when an error from Drizzle/Neon indicates a PostgreSQL
  * unique-constraint violation (code 23505), regardless of how deeply the
  * driver has nested the original PG error.
  */
-function isUniqueViolation(err: any): boolean {
-  if (!err) return false;
-  // Direct PG code (node-postgres / some Drizzle paths)
-  if (err.code === "23505") return true;
-  // Neon serverless driver wraps the PG error under .cause
-  if (err.cause?.code === "23505") return true;
-  // Fallback: message text from either driver
-  const msg: string = err.message ?? "";
+function isUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: unknown; cause?: { code?: unknown }; message?: unknown };
+  if (e.code === "23505" || e.cause?.code === "23505") return true;
+  const msg = typeof e.message === "string" ? e.message : "";
   return msg.includes("unique") || msg.includes("duplicate key");
 }
 
@@ -55,11 +67,12 @@ async function fetchRagicRecords(
   }
 
   const url = `${apiUrl}?api&APIKey=${apiKey}&limit=${limit}`;
+  let lastMessage = "";
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) {
-      console.warn(`[Ragic] Retrying fetchRagicRecords (attempt ${attempt}/${maxRetries}) after ${retryDelayMs}ms…`);
-      await new Promise(res => setTimeout(res, retryDelayMs));
+      console.warn(`[Ragic] ${apiUrl}: ${lastMessage} — retry ${attempt}/${maxRetries} in ${retryDelayMs}ms`);
+      await sleep(retryDelayMs);
     }
 
     // Task #32: Ragic exports can take a while when `limit` is in the
@@ -67,103 +80,71 @@ async function fetchRagicRecords(
     const response = await fetchWithTimeout(url, { timeoutMs: 20_000 });
 
     if (!response.ok) {
-      const msg = `Ragic API error: status=${response.status} code=${response.errorCode} msg=${response.errorMessage ?? ""}`;
-      if (attempt < maxRetries) {
-        console.warn(`[Ragic] ${msg} — will retry`);
-        continue;
-      }
-      throw new Error(msg);
+      lastMessage = `HTTP ${response.status} ${response.errorCode ?? ""} ${response.errorMessage ?? ""}`.trim();
+      // A 4xx other than 429 will not change on retry.
+      if (response.errorCode === "http_4xx" && response.status !== 429) break;
+      continue;
     }
 
-    // Empty body = Ragic returned 200 OK but no content (cold-start / rate limit).
-    // Treat as transient and retry.
-    if (!response.body || response.body.trim() === "") {
-      const msg = "Ragic API returned an empty response body";
-      if (attempt < maxRetries) {
-        console.warn(`[Ragic] ${msg} — will retry`);
-        continue;
-      }
-      throw new Error(msg);
-    }
-
-    try {
-      const data = JSON.parse(response.body) as Record<string, RagicRecord>;
-      return Object.values(data);
-    } catch (err) {
-      const msg = `Ragic API returned malformed JSON: ${err instanceof Error ? err.message : String(err)}`;
-      if (attempt < maxRetries) {
-        console.warn(`[Ragic] ${msg} — will retry`);
-        continue;
-      }
-      throw new Error(msg);
-    }
+    const parsed = parseRagicBody(response.body);
+    if (parsed.ok) return parsed.records;
+    lastMessage = `${parsed.kind}: ${parsed.message}`;
+    // Ragic's own error envelope (bad key, no access right) is final —
+    // retrying cannot fix it, and it must not be mistaken for "no rows".
+    if (parsed.kind === "api_error") break;
   }
 
-  // TypeScript unreachable, but satisfies return type
-  throw new Error("fetchRagicRecords: exhausted retries");
+  throw new Error(`Ragic API failed for ${apiUrl}: ${lastMessage}`);
 }
 
-const EXCLUDED_VENUES = new Set([
-  "勞務-民生國中", "勞務-西湖國中", "勞務-明倫高中", "勞務-永吉國中", "勞務-陽明高中",
-  "勞務-台灣科技大學", "國防醫學大學", "溪口國小", "百齡高中", "建成國中",
-  "駿斯運動事業股份有限公司", "士東國小", "新竹科學園區", "新屋高中",
-  "行銷事業處", "數位轉型發展處", "人力資源處", "營運管理處",
-]);
-
-async function syncVenues(): Promise<{ added: string[]; updated: string[]; total: number }> {
-  const departments = (await fetchRagicRecords(RAGIC_DEPT_API_URL)).filter(r => r["部門名稱"]);
+async function syncVenues(): Promise<SyncResult["venues"]> {
+  const departments = await fetchRagicRecords(RAGIC_DEPT_API_URL);
   const existingVenues = await storage.getVenues();
-  const existingVenueNames = new Set(existingVenues.map(v => v.name));
-
-  const existingInfos = await storage.getAllVenueInfos();
-  const existingInfoMap = new Map(existingInfos.map(info => [info.venueName, info]));
+  const existingNames = new Set(existingVenues.map((v) => v.name));
+  const existingInfos = new Map((await storage.getAllVenueInfos()).map((info) => [info.venueName, info]));
 
   const added: string[] = [];
   const updated: string[] = [];
+  const aliases: string[] = [];
   let colorIndex = existingVenues.length;
+  let named = 0;
 
   for (const dept of departments) {
-    const name = dept["部門名稱"] as string;
-    const googleMap = (dept["google map"] as string) || "";
-    const operationType = (dept["營運性質"] as string) || "";
+    const name = field(dept, "部門名稱");
+    if (name) named++;
+    const decision = decideVenue({ name, operationType: field(dept, "營運性質") }, existingNames);
+    if (decision.action === "skip") {
+      if (decision.reason === "labor-alias") aliases.push(name);
+      continue;
+    }
 
-    if (EXCLUDED_VENUES.has(name)) continue;
-    if (operationType === "內勤單位") continue;
-
-    if (!existingVenueNames.has(name)) {
+    if (decision.action === "create") {
       const color = VENUE_COLORS[colorIndex % VENUE_COLORS.length];
       await storage.createVenue(name, color);
       added.push(name);
-      existingVenueNames.add(name);
+      existingNames.add(name);
       colorIndex++;
-      console.log(`Ragic sync: added venue "${name}"`);
+      console.log(`[Ragic] added venue "${name}"`);
     }
 
-    const existingInfo = existingInfoMap.get(name);
-    if (!existingInfo && googleMap) {
+    const googleMap = field(dept, "google map");
+    if (!googleMap) continue;
+    const info = existingInfos.get(name);
+    if (!info) {
       await storage.upsertVenueInfo(name, null, null, googleMap);
       updated.push(name);
-      console.log(`Ragic sync: added venue info for "${name}" with map URL`);
-    } else if (existingInfo && !existingInfo.mapUrl && googleMap) {
-      await storage.upsertVenueInfo(
-        name,
-        existingInfo.videoUrl,
-        existingInfo.description,
-        googleMap
-      );
+      console.log(`[Ragic] added map URL for "${name}"`);
+    } else if (!info.mapUrl) {
+      await storage.upsertVenueInfo(name, info.videoUrl, info.description, googleMap);
       updated.push(name);
-      console.log(`Ragic sync: updated map URL for "${name}"`);
+      console.log(`[Ragic] filled in map URL for "${name}"`);
     }
   }
 
-  return { added, updated, total: departments.length };
-}
-
-function isCoachRole(record: RagicRecord): boolean {
-  const job = record["應徵職務"];
-  if (Array.isArray(job)) return job.some((j: string) => j.includes("教練"));
-  if (typeof job === "string") return job.includes("教練");
-  return false;
+  if (aliases.length > 0) {
+    console.log(`[Ragic] skipped labour-contract aliases of existing venues: ${aliases.join(", ")}`);
+  }
+  return { added, updated, total: named };
 }
 
 interface PersonalInfo {
@@ -172,117 +153,139 @@ interface PersonalInfo {
 }
 
 async function fetchPersonalInfo(): Promise<Map<string, PersonalInfo>> {
-  const records = await fetchRagicRecords(RAGIC_EMPLOYEE_API_URL, 500);
+  const records = await fetchRagicRecords(RAGIC_EMPLOYEE_API_URL);
   const infoMap = new Map<string, PersonalInfo>();
   for (const r of records) {
-    const rawName = r["姓名"] as string;
-    const name = rawName ? rawName.trim() : "";
-    const personalLineId = r["個人LINE ID"] as string;
-    const employeeId = r["員工編號"] as string;
-    if (name) {
-      infoMap.set(name, {
-        lineId: (personalLineId && personalLineId.startsWith("U")) ? personalLineId : null,
-        employeeId: employeeId || null,
-      });
-    }
+    const name = field(r, "姓名");
+    if (!name) continue;
+    infoMap.set(name, {
+      lineId: normalizeLineId(field(r, "個人LINE ID")),
+      employeeId: field(r, "員工編號") || null,
+    });
   }
-  const allInfoValues = Array.from(infoMap.values());
-  const lineIdCount = allInfoValues.filter(v => v.lineId).length;
-  const empIdCount = allInfoValues.filter(v => v.employeeId).length;
-  console.log(`[Ragic] Fetched personal info: ${lineIdCount} LINE IDs, ${empIdCount} employee IDs`);
+  const values = Array.from(infoMap.values());
+  console.log(
+    `[Ragic] personal info: ${values.filter((v) => v.lineId).length} LINE IDs, ` +
+      `${values.filter((v) => v.employeeId).length} employee IDs`,
+  );
   return infoMap;
 }
 
-async function syncCoaches(): Promise<{ added: number; total: number; lineIdsSynced: number; employeeIdsSynced: number }> {
-  const [allRecords, personalInfoMap] = await Promise.all([
-    fetchRagicRecords(RAGIC_COACH_API_URL, 500),
-    fetchPersonalInfo(),
-  ]);
+async function syncCoaches(): Promise<SyncResult["coaches"]> {
+  // Sequential on purpose: Ragic answers bursts with empty 200 bodies.
+  const allRecords = await fetchRagicRecords(RAGIC_COACH_API_URL);
+  const personalInfo = await fetchPersonalInfo();
 
-  const EXCLUDED_NAMES = ["(測試帳號)教練"];
-  const activeCoaches = allRecords.filter(r => r["姓名"] && isCoachRole(r) && !EXCLUDED_NAMES.includes(r["姓名"] as string));
+  const seen = new Set<string>();
+  const activeCoaches: { name: string; phone: string | null; email: string | null }[] = [];
+  for (const r of allRecords) {
+    const name = field(r, "姓名");
+    if (!name || EXCLUDED_NAMES.has(name) || !isCoachRole(r)) continue;
+    if (seen.has(name)) {
+      console.warn(`[Ragic] duplicate coach row in Ragic for "${name}" — using the first`);
+      continue;
+    }
+    seen.add(name);
+    activeCoaches.push({ name, phone: field(r, "手機") || null, email: field(r, "E-mail") || null });
+  }
+  if (allRecords.length > 0 && activeCoaches.length === 0) {
+    console.warn(
+      `[Ragic] ${allRecords.length} coach rows fetched but none had 姓名 + 教練 職務 — have the sheet's field names changed?`,
+    );
+  }
 
-  const existingCoaches = await storage.getAllCoachUsers();
-  const existingByName = new Map(existingCoaches.map(c => [c.name, c]));
+  const existing = await storage.getAllCoachUsers();
+  const byName = indexCoachUsersByName(existing);
+  const byLineId = indexCoachUsersByLineId(existing);
 
   let added = 0;
   let lineIdsSynced = 0;
   let employeeIdsSynced = 0;
 
   for (const coach of activeCoaches) {
-    const rawName = coach["姓名"] as string;
-    const name = rawName.trim();
-    const phone = (coach["手機"] as string) || null;
-    const email = (coach["E-mail"] as string) || null;
-    const info = personalInfoMap.get(name);
-    const personalLineId = info?.lineId || null;
-    const employeeId = info?.employeeId || null;
+    const info = personalInfo.get(coach.name);
+    const lineId = info?.lineId ?? null;
+    const employeeId = info?.employeeId ?? null;
+    const current = byName.get(coach.name);
 
-    const existing = existingByName.get(name);
-
-    if (!existing) {
+    if (!current) {
+      // Never hand a LINE ID that another account already owns to a new
+      // row — that is the unique violation the old sync kept logging.
+      const owner = lineId ? byLineId.get(lineId) : undefined;
+      if (owner) {
+        console.warn(`[Ragic] "${coach.name}": LINE ID already bound to "${owner.name}" — creating without it`);
+      }
       try {
-        await storage.createCoachUser({
-          name,
-          phone,
-          email,
+        const created = await storage.createCoachUser({
+          name: coach.name,
+          phone: coach.phone,
+          email: coach.email,
           status: "approved",
           role: "coach",
-          lineId: personalLineId,
-          linkedCoachName: name,
+          lineId: owner ? null : lineId,
+          linkedCoachName: coach.name,
           employeeId,
         });
-        existingByName.set(name, { name, lineId: personalLineId, employeeId } as any);
+        byName.set(coach.name, created);
+        if (created.lineId) byLineId.set(created.lineId, created);
         added++;
-        if (personalLineId) lineIdsSynced++;
+        if (created.lineId) lineIdsSynced++;
         if (employeeId) employeeIdsSynced++;
-        console.log(`[Ragic] Added coach "${name}"${personalLineId ? " with LINE ID" : ""}${employeeId ? ` (${employeeId})` : ""}`);
-      } catch (err: any) {
-        if (err?.message?.includes("unique") || err?.code === "23505") {
-          console.warn(`[Ragic] Skipped creating coach "${name}": duplicate value (LINE ID or name conflict)`);
+        console.log(
+          `[Ragic] added coach "${coach.name}"${created.lineId ? " with LINE ID" : ""}${employeeId ? ` (${employeeId})` : ""}`,
+        );
+      } catch (err) {
+        if (isUniqueViolation(err)) {
+          console.warn(`[Ragic] skipped creating "${coach.name}": unique conflict (registered concurrently?)`);
         } else {
-          console.error(`[Ragic] Failed to create coach "${name}":`, err?.message);
-          throw err;
+          console.error(`[Ragic] failed to create "${coach.name}":`, errMessage(err));
         }
       }
-    } else {
-      if (personalLineId && !existing.lineId) {
+      continue;
+    }
+
+    if (lineId && !current.lineId) {
+      const owner = byLineId.get(lineId);
+      if (owner && owner.id !== current.id) {
+        console.warn(`[Ragic] "${coach.name}": LINE ID already bound to "${owner.name}" — not re-binding`);
+      } else {
         try {
-          await storage.updateCoachUserLineId(existing.id, personalLineId);
-          lineIdsSynced++;
-          console.log(`[Ragic] Synced LINE ID for coach "${name}" (was empty)`);
-        } catch (err: any) {
-          if (isUniqueViolation(err)) {
-            console.warn(`[Ragic] Skipped LINE ID sync for coach "${name}": LINE ID already used by another coach`);
-          } else {
-            console.error(`[Ragic] Failed to sync LINE ID for coach "${name}":`, err?.message);
+          const updatedUser = await storage.updateCoachUserLineId(current.id, lineId);
+          if (updatedUser) {
+            byName.set(coach.name, updatedUser);
+            byLineId.set(lineId, updatedUser);
+            lineIdsSynced++;
+            console.log(`[Ragic] synced LINE ID for "${coach.name}" (was empty)`);
           }
-        }
-      }
-      if (employeeId && !existing.employeeId) {
-        try {
-          await storage.updateCoachEmployeeId(existing.id, employeeId);
-          employeeIdsSynced++;
-          console.log(`[Ragic] Synced employee ID for coach "${name}": ${employeeId}`);
-        } catch (err: any) {
+        } catch (err) {
           if (isUniqueViolation(err)) {
-            console.warn(`[Ragic] Skipped employee ID sync for coach "${name}": employee ID already used by another coach`);
+            console.warn(`[Ragic] skipped LINE ID for "${coach.name}": taken by another account`);
           } else {
-            console.error(`[Ragic] Failed to sync employee ID for coach "${name}":`, err?.message);
+            console.error(`[Ragic] failed to sync LINE ID for "${coach.name}":`, errMessage(err));
           }
         }
       }
     }
+
+    if (employeeId && !current.employeeId) {
+      try {
+        await storage.updateCoachEmployeeId(current.id, employeeId);
+        employeeIdsSynced++;
+        console.log(`[Ragic] synced employee ID for "${coach.name}": ${employeeId}`);
+      } catch (err) {
+        console.error(`[Ragic] failed to sync employee ID for "${coach.name}":`, errMessage(err));
+      }
+    }
   }
 
-  if (added > 0) console.log(`[Ragic] Added ${added} new coaches`);
-  if (lineIdsSynced > 0) console.log(`[Ragic] Synced ${lineIdsSynced} LINE IDs total`);
-  if (employeeIdsSynced > 0) console.log(`[Ragic] Synced ${employeeIdsSynced} employee IDs total`);
+  if (added > 0) console.log(`[Ragic] added ${added} new coaches`);
+  if (lineIdsSynced > 0) console.log(`[Ragic] synced ${lineIdsSynced} LINE IDs`);
+  if (employeeIdsSynced > 0) console.log(`[Ragic] synced ${employeeIdsSynced} employee IDs`);
 
   return { added, total: activeCoaches.length, lineIdsSynced, employeeIdsSynced };
 }
 
-export async function syncRagicAll(): Promise<typeof lastSyncResult> {
+export async function syncRagicAll(): Promise<SyncResult | null> {
   if (isSyncing) {
     return lastSyncResult;
   }
@@ -290,38 +293,62 @@ export async function syncRagicAll(): Promise<typeof lastSyncResult> {
   isSyncing = true;
 
   try {
-    const venueResult = await syncVenues();
-    const coachResult = await syncCoaches();
-
-    const result = {
-      venues: venueResult,
-      coaches: coachResult,
-    };
+    const venues = await syncVenues();
+    const coaches = await syncCoaches();
+    const result: SyncResult = { venues, coaches };
 
     lastSyncTime = new Date().toISOString();
     lastSyncResult = result;
+    lastError = null;
 
-    console.log(`Ragic sync completed: ${venueResult.total} departments (${venueResult.added.length} new), ${coachResult.total} active coaches (${coachResult.added} new, ${coachResult.lineIdsSynced} LINE IDs synced)`);
+    console.log(
+      `[Ragic] sync completed: ${venues.total} departments (${venues.added.length} new), ` +
+        `${coaches.total} active coaches (${coaches.added} new, ${coaches.lineIdsSynced} LINE IDs synced)`,
+    );
     return result;
   } catch (error) {
-    console.error("Ragic sync error:", error);
+    lastError = { at: new Date().toISOString(), message: errMessage(error) };
+    console.error("[Ragic] sync failed:", lastError.message);
     throw error;
   } finally {
     isSyncing = false;
   }
 }
 
-export function setupRagicSyncCron() {
-  syncRagicAll().catch(err => {
-    console.error("Initial Ragic sync failed:", err);
-  });
-
-  cron.schedule('0 19 * * *', () => {
-    console.log('[Ragic] Daily sync triggered at 03:00 TST (19:00 UTC)');
-    syncRagicAll().catch(err => {
-      console.error("Scheduled Ragic sync failed:", err);
+function scheduleBootRetry(attempt: number) {
+  if (attempt >= BOOT_RETRY_DELAYS_MS.length) return;
+  const delay = BOOT_RETRY_DELAYS_MS[attempt];
+  console.warn(`[Ragic] boot sync failed — retry #${attempt + 1} in ${delay / 60_000} min`);
+  setTimeout(() => {
+    console.log(`[Ragic] boot retry #${attempt + 1} starting…`);
+    syncRagicAll().catch((err) => {
+      console.error(`[Ragic] boot retry #${attempt + 1} failed:`, errMessage(err));
+      scheduleBootRetry(attempt + 1);
     });
-  });
+  }, delay);
+}
 
-  console.log('[Ragic] Daily sync scheduled: 03:00 Asia/Taipei');
+export function setupRagicSyncCron() {
+  setTimeout(() => {
+    console.log("[Ragic] boot sync starting");
+    syncRagicAll().catch((err) => {
+      console.error("[Ragic] boot sync failed:", errMessage(err));
+      scheduleBootRetry(0);
+    });
+  }, BOOT_SYNC_DELAY_MS);
+
+  // Taiwan has no DST, so 03:00 Asia/Taipei is the same instant as the
+  // old "0 19 * * *" in server-local UTC — just written the way it reads.
+  cron.schedule(
+    "0 3 * * *",
+    () => {
+      console.log("[Ragic] daily sync triggered (03:00 Asia/Taipei)");
+      syncRagicAll().catch((err) => {
+        console.error("[Ragic] scheduled sync failed:", errMessage(err));
+      });
+    },
+    { timezone: "Asia/Taipei" },
+  );
+
+  console.log(`[Ragic] daily sync scheduled 03:00 Asia/Taipei; boot sync in ${BOOT_SYNC_DELAY_MS / 1000}s`);
 }

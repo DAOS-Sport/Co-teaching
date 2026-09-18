@@ -1,4 +1,5 @@
 import type { Express, Request } from "express";
+import { randomBytes } from "crypto";
 import { storage } from "../storage";
 import { isAuthenticated } from "../replitAuth";
 import { env } from "../config/env";
@@ -23,6 +24,7 @@ export type LineLoginToken = {
   lineName: string;
   linePicture: string;
   expiresAt: number;
+  existingCoachUserId?: string;
 };
 
 /**
@@ -38,13 +40,20 @@ function getLineRedirectUri(): string {
 }
 
 function generateToken(): string {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let result = "";
-  for (let i = 0; i < 48; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
+  return randomBytes(36).toString("base64url");
+}
+
+/**
+ * Atomically consume a short-lived LINE login token. Deleting before the
+ * caller performs any async work prevents two concurrent requests from
+ * replaying the same credential.
+ */
+export function consumeLineLoginToken(token: string): LineLoginToken | null {
+  const data = lineLoginTokens.get(token);
+  if (!data) return null;
+  lineLoginTokens.delete(token);
+  if (Date.now() > data.expiresAt) return null;
+  return data;
 }
 
 export function registerAuthRoutes(app: Express): void {
@@ -167,14 +176,18 @@ export function registerAuthRoutes(app: Express): void {
 
       const existingUser = await storage.getCoachUserByLineId(profile.userId);
       if (existingUser) {
-        // Issue a coach-portal session token bound to this user so subsequent
-        // calls to /api/coach-portal/me/:identifier can prove ownership.
-        const coachToken = await issueCoachSessionToken(
-          existingUser.id,
-          profile.userId
-        );
+        // Only a short-lived, one-time exchange code enters the browser URL.
+        // The long-lived coach token is returned later in a POST response.
+        const token = generateToken();
+        lineLoginTokens.set(token, {
+          lineId: profile.userId,
+          lineName: profile.displayName,
+          linePicture: profile.pictureUrl || "",
+          existingCoachUserId: existingUser.id,
+          expiresAt: Date.now() + 15 * 60 * 1000,
+        });
         return res.redirect(
-          `/coach-portal?lineLogin=existing&userId=${existingUser.id}&coachToken=${coachToken}`
+          `/coach-portal#lineLogin=existing&token=${token}`
         );
       }
 
@@ -186,7 +199,7 @@ export function registerAuthRoutes(app: Express): void {
         expiresAt: Date.now() + 15 * 60 * 1000,
       });
 
-      return res.redirect(`/coach-portal?lineLogin=new&token=${token}`);
+      return res.redirect(`/coach-portal#lineLogin=new&token=${token}`);
     } catch (error) {
       console.error("LINE Login callback error:", error);
       return res.redirect("/coach-portal?error=callback_failed");
@@ -198,8 +211,30 @@ export function registerAuthRoutes(app: Express): void {
     res.json({ configured });
   });
 
-  app.get("/api/auth/line/token-info/:token", (req, res) => {
-    const { token } = req.params;
+  app.post("/api/auth/line/exchange", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const token = typeof req.body?.token === "string" ? req.body.token : "";
+    const data = consumeLineLoginToken(token);
+    if (!data?.existingCoachUserId) {
+      return res.status(400).json({ message: "登入交換碼已過期或已使用" });
+    }
+
+    try {
+      const user = await storage.getCoachUserById(data.existingCoachUserId);
+      if (!user || user.lineId !== data.lineId) {
+        return res.status(403).json({ message: "LINE 身分驗證失敗" });
+      }
+      const coachToken = await issueCoachSessionToken(user.id, data.lineId);
+      return res.json({ ...user, coachToken });
+    } catch (error) {
+      console.error("LINE login exchange error:", error);
+      return res.status(500).json({ message: "登入交換失敗，請重新登入" });
+    }
+  });
+
+  app.post("/api/auth/line/token-info", (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const token = typeof req.body?.token === "string" ? req.body.token : "";
     const data = lineLoginTokens.get(token);
     if (!data || Date.now() > data.expiresAt) {
       lineLoginTokens.delete(token);

@@ -179,7 +179,7 @@ export default function SchoolView() {
           </Button>
 
           <div className="text-sm font-semibold text-center whitespace-nowrap min-w-[220px]">
-            {format(currentWeek, "yyyy年MM月dd日", { locale: zhTW })} - {format(addDays(currentWeek, 4), "MM月dd日", { locale: zhTW })}
+            {format(currentWeek, "yyyy年MM月dd日", { locale: zhTW })} - {format(addDays(currentWeek, 6), "MM月dd日", { locale: zhTW })}
           </div>
 
           <Button

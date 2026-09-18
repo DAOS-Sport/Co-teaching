@@ -11,6 +11,7 @@ import { queues } from "./queue/queues";
 import { lineGroups } from "../config/lineGroups";
 import { startWeeklyPushWorkers } from "../modules/weeklyPush/weeklyPush.worker";
 import { enqueueWeeklyPush } from "../modules/weeklyPush/weeklyPush.service";
+import { setupWeeklyPushReconciliation } from "../modules/weeklyPush/weeklyPush.reconcile";
 
 /**
  * Hard-fails the boot if required configuration is missing.
@@ -96,7 +97,7 @@ export async function initializeAppData(): Promise<void> {
   } catch (error) {
     console.error(`${tag}: ❌ Multi-school initialization FAILED:`, error);
 
-    if (env.isDeployment) {
+    if (env.isDeployment && featureFlags.enableWeeklyPushWorker) {
       console.error(
         "🚨 CRITICAL: Production deployment failed to initialize database!"
       );
@@ -144,6 +145,7 @@ export async function startWeeklyPushQueue(): Promise<void> {
 
     if (featureFlags.enableWeeklyPushWorker) {
       await startWeeklyPushWorkers();
+      setupWeeklyPushReconciliation();
     } else {
       console.log("[boot] weekly push worker disabled — queue will accumulate");
     }
@@ -186,10 +188,12 @@ export async function startWeeklyPushQueue(): Promise<void> {
           `[boot] weekly push cron scheduled (${env.weeklyPushCron} ${env.weeklyPushTimezone})`,
         );
       }
-    } else {
+    } else if (!env.isDeployment) {
       console.log(
         "[boot] dev environment — weekly push cron NOT scheduled (REPLIT_DEPLOYMENT!=1)",
       );
+    } else {
+      console.warn("[boot] weekly push cron NOT scheduled — worker is disabled");
     }
   } catch (err) {
     console.error("[boot] weekly push queue init failed:", err);

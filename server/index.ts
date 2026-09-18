@@ -21,7 +21,9 @@ app.use((req, res, next) => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
+      // MCP tool responses may contain source code or command output. Never
+      // mirror those bodies into the generic API request log.
+      if (capturedJsonResponse && path !== "/api/mcp") {
         logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
       }
 

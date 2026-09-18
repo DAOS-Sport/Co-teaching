@@ -16,6 +16,7 @@ import { format, addWeeks, subWeeks, startOfWeek } from "date-fns";
 import { zhTW } from "date-fns/locale";
 import FloatingConflictAlert from "@/components/floating-conflict-alert";
 import AdminLayout from "@/components/admin-layout";
+import { useLocation } from "wouter";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -118,15 +119,15 @@ function CoachSearchSelect({
   };
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className="relative min-w-0">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className={`w-full h-7 text-xs px-2 rounded border flex items-center justify-between gap-1 ${triggerClassName}`}
+        className={`coach-select-trigger w-full text-xs px-2 py-1 rounded border flex items-center justify-between gap-1 ${triggerClassName}`}
       >
-        <div className="flex items-center gap-1 min-w-0">
+        <div className="flex items-start gap-1 min-w-0 flex-1">
           {hasValue && <Check className="h-3 w-3 flex-shrink-0 text-green-600" />}
-          <span className={`flex-1 min-w-0 truncate ${value ? "" : "text-gray-400"}`}>
+          <span className={`coach-select-name min-w-0 ${value ? "" : "text-gray-400"}`}>
             {value || placeholder}
           </span>
         </div>
@@ -141,7 +142,7 @@ function CoachSearchSelect({
       </button>
 
       {open && (
-        <div className="absolute z-50 top-full left-0 mt-0.5 min-w-[220px] w-max max-w-[320px] bg-white border border-gray-200 rounded shadow-lg">
+        <div className="coach-select-menu absolute z-50 top-full left-0 mt-0.5 bg-white border border-gray-200 rounded shadow-lg">
           {substituteMode && (
             <div className="px-2 py-1 text-[10px] text-orange-600 font-medium bg-orange-50 border-b border-orange-100 flex items-center justify-between">
               <span>代班模式：顯示全部教練</span>
@@ -254,10 +255,14 @@ function CoachSearchSelect({
 function CoachAssignmentContent() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [selectedVenue, setSelectedVenue] = useState<string>("");
-  const [currentWeek, setCurrentWeek] = useState<Date>(() =>
-    startOfWeek(new Date(), { weekStartsOn: 1 })
-  );
+  const [, setLocation] = useLocation();
+  const initialParams = new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
+  const [selectedVenue, setSelectedVenue] = useState<string>(() => initialParams.get("venueId") || "");
+  const [currentWeek, setCurrentWeek] = useState<Date>(() => {
+    const requestedWeek = initialParams.get("week");
+    const parsed = requestedWeek ? new Date(`${requestedWeek}T00:00:00`) : new Date();
+    return startOfWeek(Number.isNaN(parsed.getTime()) ? new Date() : parsed, { weekStartsOn: 1 });
+  });
   const [selectedCell, setSelectedCell] = useState<{
     date: string;
     timeSlotId: string;
@@ -276,6 +281,28 @@ function CoachAssignmentContent() {
 
   const weekStart = format(currentWeek, "yyyy-MM-dd");
   const weekEnd = format(getExtendedWeekEnd(currentWeek), "yyyy-MM-dd");
+  // This page intentionally displays weekdays only. Keep weekEnd on Sunday so
+  // weekend records remain loaded for conflict checks and are never modified.
+  const displayedWeekDays = useMemo(
+    () => getExtendedWeekDays(currentWeek).slice(0, 5),
+    [currentWeek]
+  );
+  const displayedWeekDayNames = useMemo(
+    () => getExtendedWeekdayNames(currentWeek).slice(0, 5),
+    [currentWeek]
+  );
+
+  useEffect(() => {
+    if (venues && venues.length > 0 && !selectedVenue) setSelectedVenue(venues[0].id);
+  }, [venues, selectedVenue]);
+
+  useEffect(() => {
+    if (!selectedVenue) return;
+    const params = new URLSearchParams();
+    params.set("venueId", selectedVenue);
+    params.set("week", weekStart);
+    setLocation(`/mgt-x9k7p2/assign?${params.toString()}`, { replace: true });
+  }, [selectedVenue, weekStart, setLocation]);
 
   const { data: schedules = [] } = useQuery<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]>({
     queryKey: [`/api/schedules?startDate=${weekStart}&endDate=${weekEnd}&venueId=${selectedVenue}`],
@@ -406,6 +433,7 @@ function CoachAssignmentContent() {
           typeof query.queryKey[0] === "string" &&
           (query.queryKey[0].includes("/api/schedules") || query.queryKey[0].includes("/api/conflicts")),
       });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).includes("/api/statistics") });
       localStorage.setItem("scheduleLastModified", Date.now().toString());
       toast({ title: "指派成功", description: "教練已更新，將於上課前一天推播通知" });
     },
@@ -559,23 +587,20 @@ function CoachAssignmentContent() {
     : null;
 
   const weekDateLabel = `${format(currentWeek, "yyyy/MM/dd")} - ${format(
-    new Date(currentWeek.getTime() + 4 * 86400000),
+    new Date(currentWeek.getTime() + 6 * 86400000),
     "MM/dd"
   )}`;
 
   const headerCenter = (
     <div className="flex items-center gap-2 flex-nowrap">
       <span className="text-sm font-medium whitespace-nowrap">選擇場館：</span>
-      <Select value={selectedVenue} onValueChange={setSelectedVenue}>
-        <SelectTrigger className="w-36 h-8 text-sm">
-          <SelectValue placeholder="請選擇場館" />
-        </SelectTrigger>
-        <SelectContent>
+      <select value={selectedVenue} onChange={(event) => setSelectedVenue(event.target.value)} className="w-36 h-8 rounded border bg-background px-2 text-sm">
+        <option value="">請選擇場館</option>
           {venues?.map((venue) => (
-            <SelectItem key={venue.id} value={venue.id}>{venue.name}</SelectItem>
+            <option key={venue.id} value={venue.id}>{venue.name}</option>
           ))}
-        </SelectContent>
-      </Select>
+      </select>
+      <span className="text-xs text-muted-foreground">{venues?.find((venue) => venue.id === selectedVenue)?.name || "未選擇"}</span>
       <Button variant="outline" size="icon" className="h-8 w-8"
         onClick={() => setCurrentWeek((prev) => subWeeks(prev, 1))}>
         <ChevronLeft className="h-4 w-4" />
@@ -731,35 +756,38 @@ function CoachAssignmentContent() {
         {/* Schedule table */}
         {selectedVenue ? (
           <div className="overflow-x-auto">
-            <table className="w-full border-collapse min-w-[600px]">
+            <table className="coach-assignment-table border-collapse">
+              <colgroup>
+                <col className="time-column" />
+                {displayedWeekDays.map((date) => (
+                  <col key={format(date, "yyyy-MM-dd")} className="weekday-column" />
+                ))}
+              </colgroup>
               <thead className="sticky top-0 z-10">
                 <tr>
-                  <th className="border border-gray-300 p-2 bg-gray-50 w-20 sticky left-0 z-20 shadow-[2px_0_4px_rgba(0,0,0,0.1)]">
+                  <th className="border border-gray-300 p-2 bg-gray-50 w-28 min-w-[112px] sticky left-0 z-20 shadow-[2px_0_4px_rgba(0,0,0,0.1)]">
                     節次/時間
                   </th>
-                  {getExtendedWeekDays(currentWeek).map((date, index) => {
-                    const weekDayNames = getExtendedWeekdayNames(currentWeek);
-                    return (
-                      <th key={index} className="border border-gray-300 p-2 bg-gray-50 min-w-36">
-                        <div className="text-center">
-                          <div className="font-semibold">{weekDayNames[index]}</div>
-                          <div className="text-sm text-gray-600">{format(date, "MM/dd")}</div>
-                        </div>
-                      </th>
-                    );
-                  })}
+                  {displayedWeekDays.map((date, index) => (
+                    <th key={format(date, "yyyy-MM-dd")} className="schedule-column border border-gray-300 p-2 bg-gray-50">
+                      <div className="text-center">
+                        <div className="font-semibold">{displayedWeekDayNames[index]}</div>
+                        <div className="text-sm text-gray-600">{format(date, "MM/dd")}</div>
+                      </div>
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {timeSlots.map((timeSlot) => (
                   <tr key={timeSlot.id}>
-                    <td className="border border-gray-300 p-2 bg-gray-50 text-center sticky left-0 z-10 shadow-[2px_0_4px_rgba(0,0,0,0.1)]">
+                    <td className="border border-gray-300 p-2 bg-gray-50 text-center sticky left-0 z-10 shadow-[2px_0_4px_rgba(0,0,0,0.1)] w-28 min-w-[112px]">
                       <div className="font-medium">{timeSlot.period}</div>
                       <div className="text-xs text-gray-600">
                         {timeSlot.startTime}-{timeSlot.endTime}
                       </div>
                     </td>
-                    {getExtendedWeekDays(currentWeek).map((date, index) => {
+                    {displayedWeekDays.map((date, index) => {
                       const dateStr = format(date, "yyyy-MM-dd");
                       const daySchedules = schedulesByDateAndTime[dateStr]?.[timeSlot.id] || [];
                       const dayOfWeek = date.getDay() === 0 ? 7 : date.getDay();
@@ -769,10 +797,9 @@ function CoachAssignmentContent() {
                       return (
                         <td
                           key={`${timeSlot.id}-${index}`}
-                          className={`border border-gray-300 p-1 align-top cursor-pointer transition-colors ${
+                          className={`assignment-cell border border-gray-300 p-1 align-top cursor-pointer transition-colors ${
                             isSelected ? "ring-2 ring-inset ring-blue-400 bg-blue-50/30" : ""
                           }`}
-                          style={{ minHeight: "80px", verticalAlign: "top" }}
                           onClick={() =>
                             setSelectedCell({
                               date: dateStr,
@@ -781,8 +808,8 @@ function CoachAssignmentContent() {
                             })
                           }
                         >
-                          {/* Schedule cards: single col on mobile, 2-col grid on md+ when 2+ classes */}
-                          <div className={`min-h-[80px] gap-1 ${daySchedules.length >= 2 ? "flex flex-col md:grid md:grid-cols-2" : "flex flex-col"}`}>
+                          {/* Keep cards stacked so each card retains enough width for names and controls. */}
+                          <div className="flex flex-col gap-1">
                             {daySchedules.map((schedule) => {
                               if (!schedule.className) return null;
                               const hasCoach = !!schedule.coachName;
@@ -811,74 +838,62 @@ function CoachAssignmentContent() {
                                     setSelectedCell({ date: dateStr, timeSlotId: timeSlot.id, timeSlotOrder: timeSlot.order });
                                     setSelectedScheduleId(isCardSelected ? null : schedule.id);
                                   }}
-                                  className={`rounded p-1.5 space-y-1 cursor-pointer transition-all ${missingBg} ${
+                                  className={`assignment-card rounded p-1 space-y-1 cursor-pointer transition-all ${missingBg} ${
                                     isCardSelected ? "ring-2 ring-blue-500 shadow-md" : "hover:shadow-sm"
                                   }`}
                                 >
-                                  <div className="bg-gray-700 text-white text-xs font-bold px-2 py-1 rounded text-center truncate flex items-center justify-center gap-1">
-                                    {schedule.className}
-                                    {needsTwo && <span className="text-[9px] opacity-75">(2位)</span>}
+                                  <div className="bg-gray-700 text-white text-xs px-1.5 py-0.5 rounded text-center break-words whitespace-normal leading-4">
+                                    <span className="font-bold">{schedule.className}</span>
+                                    <span className="font-normal opacity-90">｜需{schedule.coachCount || 1}位</span>
                                   </div>
-                                  <CoachSearchSelect
-                                    value={schedule.coachName || ""}
-                                    onValueChange={(value) => {
-                                      assignCoachMutation.mutate({
-                                        scheduleId: schedule.id,
-                                        coachName: value === "__clear__" ? "" : value,
-                                      });
-                                    }}
-                                    coaches={venueEligibleCoaches}
-                                    allCoaches={coaches}
-                                    available={available}
-                                    softConflicts={coach1Info.softConflicts}
-                                    hardDisabled={coach1Info.hardDisabled}
-                                    onSoftConflictSelect={(coach, details) =>
-                                      setConflictConfirm({
-                                        coach,
-                                        details,
-                                        onConfirm: () =>
-                                          assignCoachMutation.mutate({
-                                            scheduleId: schedule.id,
-                                            coachName: coach,
-                                          }),
-                                      })
-                                    }
-                                    placeholder="教練1"
-                                    hasValue={hasCoach}
-                                    triggerClassName={
-                                      hasCoach ? "border-green-400 bg-green-50" : "border-red-400 bg-red-50"
-                                    }
-                                  />
-                                  {hasCoach && (
-                                    <label
-                                      className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
-                                      onClick={(e) => e.stopPropagation()}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={!!schedule.coach1IsTeaching}
+                                  <div className="coach-assignment-row">
+                                    <CoachSearchSelect
+                                      value={schedule.coachName || ""}
+                                      onValueChange={(value) => {
+                                        assignCoachMutation.mutate({
+                                          scheduleId: schedule.id,
+                                          coachName: value === "__clear__" ? "" : value,
+                                        });
+                                      }}
+                                      coaches={venueEligibleCoaches}
+                                      allCoaches={coaches}
+                                      available={available}
+                                      softConflicts={coach1Info.softConflicts}
+                                      hardDisabled={coach1Info.hardDisabled}
+                                      onSoftConflictSelect={(coach, details) =>
+                                        setConflictConfirm({
+                                          coach,
+                                          details,
+                                          onConfirm: () =>
+                                            assignCoachMutation.mutate({
+                                              scheduleId: schedule.id,
+                                              coachName: coach,
+                                            }),
+                                        })
+                                      }
+                                      placeholder="教練1"
+                                      hasValue={hasCoach}
+                                      triggerClassName={
+                                        hasCoach ? "border-green-400 bg-green-50" : "border-red-400 bg-red-50"
+                                      }
+                                    />
+                                    {hasCoach && (
+                                      <select
+                                        aria-label={`${schedule.className} 第一位教練角色`}
+                                        value={schedule.coach1IsTeaching ? "teaching" : "assist"}
                                         onChange={(e) => {
-                                          e.stopPropagation();
                                           assignCoachMutation.mutate({
                                             scheduleId: schedule.id,
-                                            coach1IsTeaching: e.target.checked,
+                                            coach1IsTeaching: e.target.value === "teaching",
                                           });
                                         }}
-                                        className="h-3 w-3 rounded border-gray-300"
-                                      />
-                                      <span
-                                        className={`text-[10px] ${
-                                          schedule.coach1IsTeaching
-                                            ? "text-blue-600 font-semibold"
-                                            : "text-gray-400"
-                                        }`}
-                                      >
-                                        當班教學
-                                      </span>
-                                    </label>
-                                  )}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="coach-role-select h-8 rounded border bg-white px-1 text-xs"
+                                      ><option value="teaching">當班教學</option><option value="assist">協同教學</option></select>
+                                    )}
+                                  </div>
                                   {needsTwo && (
-                                    <>
+                                    <div className="coach-assignment-row">
                                       <CoachSearchSelect
                                         value={schedule.coachName2 || ""}
                                         onValueChange={(value) => {
@@ -912,34 +927,20 @@ function CoachAssignmentContent() {
                                         }
                                       />
                                       {hasCoach2 && (
-                                        <label
-                                          className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
+                                        <select
+                                          aria-label={`${schedule.className} 第二位教練角色`}
+                                          value={schedule.coach2IsTeaching ? "teaching" : "assist"}
+                                          onChange={(e) => {
+                                            assignCoachMutation.mutate({
+                                              scheduleId: schedule.id,
+                                              coach2IsTeaching: e.target.value === "teaching",
+                                            });
+                                          }}
                                           onClick={(e) => e.stopPropagation()}
-                                        >
-                                          <input
-                                            type="checkbox"
-                                            checked={!!schedule.coach2IsTeaching}
-                                            onChange={(e) => {
-                                              e.stopPropagation();
-                                              assignCoachMutation.mutate({
-                                                scheduleId: schedule.id,
-                                                coach2IsTeaching: e.target.checked,
-                                              });
-                                            }}
-                                            className="h-3 w-3 rounded border-gray-300"
-                                          />
-                                          <span
-                                            className={`text-[10px] ${
-                                              schedule.coach2IsTeaching
-                                                ? "text-blue-600 font-semibold"
-                                                : "text-gray-400"
-                                            }`}
-                                          >
-                                            當班教學
-                                          </span>
-                                        </label>
+                                          className="coach-role-select h-8 rounded border bg-white px-1 text-xs"
+                                        ><option value="teaching">當班教學</option><option value="assist">協同教學</option></select>
                                       )}
-                                    </>
+                                    </div>
                                   )}
                                 </div>
                               );

@@ -7,7 +7,16 @@ import { format, startOfWeek, addWeeks, subWeeks } from "date-fns";
 import { zhTW } from "date-fns/locale";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { Check, ChevronsUpDown } from "lucide-react";
 import type { Schedule, Venue, TimeSlot } from "@shared/schema";
 import { getExtendedWeekDays, getExtendedWeekdayNames, getExtendedWeekEnd } from "@/utils/special-workdays";
 import AdminLayout from "@/components/admin-layout";
@@ -16,6 +25,7 @@ export default function CoachView() {
   const { user } = useAuth();
   const [currentWeek, setCurrentWeek] = useState(startOfWeek(new Date(), { weekStartsOn: 1 }));
   const [selectedCoach, setSelectedCoach] = useState<string>('');
+  const [coachPickerOpen, setCoachPickerOpen] = useState(false);
 
   const weekStart = format(currentWeek, 'yyyy-MM-dd');
   const weekEnd = format(getExtendedWeekEnd(currentWeek), 'yyyy-MM-dd');
@@ -85,18 +95,48 @@ export default function CoachView() {
   const headerCenter = (
     <div className="flex items-center gap-2 flex-nowrap">
       <span className="text-sm font-medium whitespace-nowrap">選擇教練：</span>
-      <Select value={selectedCoach} onValueChange={setSelectedCoach}>
-        <SelectTrigger className="w-36 h-8 text-sm" data-testid="select-coach">
-          <SelectValue placeholder="選擇教練" />
-        </SelectTrigger>
-        <SelectContent>
-          {derivedCoaches?.map((coach) => (
-            <SelectItem key={coach} value={coach} data-testid={`option-${coach}`}>
-              {coach}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <Popover open={coachPickerOpen} onOpenChange={setCoachPickerOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="outline"
+            role="combobox"
+            aria-expanded={coachPickerOpen}
+            aria-label="搜尋並選擇教練"
+            className="h-8 w-44 justify-between px-2 text-sm font-normal"
+            data-testid="select-coach"
+          >
+            <span className="truncate">{selectedCoach || "搜尋教練姓名"}</span>
+            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-56 p-0" align="start">
+          <Command>
+            <CommandInput
+              placeholder="輸入教練姓名..."
+              data-testid="input-coach-search"
+            />
+            <CommandList>
+              <CommandEmpty>找不到符合的教練</CommandEmpty>
+              <CommandGroup>
+                {derivedCoaches.map((coach) => (
+                  <CommandItem
+                    key={coach}
+                    value={coach}
+                    onSelect={() => {
+                      setSelectedCoach(coach);
+                      setCoachPickerOpen(false);
+                    }}
+                    data-testid={`option-${coach}`}
+                  >
+                    <Check className={`h-4 w-4 ${selectedCoach === coach ? "opacity-100" : "opacity-0"}`} />
+                    {coach}
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
       <Button variant="outline" size="icon" className="h-8 w-8"
         onClick={() => setCurrentWeek(prev => subWeeks(prev, 1))}
         data-testid="button-prev-week">
@@ -190,7 +230,7 @@ const coachViewHelp: HelpSection[] = [
     steps: [
       {
         title: "查看個人週課表",
-        desc: "頁面上方下拉選單選擇教練姓名後，下方格子顯示該教練整週的所有課次，以場館顏色區分。",
+        desc: "點開頁面上方的教練欄位，可直接輸入姓名搜尋並選擇教練；下方格子會顯示該教練整週的所有課次，以場館顏色區分。",
         tip: "預設會自動選取您自己的名字（需登入）。",
       },
       {
