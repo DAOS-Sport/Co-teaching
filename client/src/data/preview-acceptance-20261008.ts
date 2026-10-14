@@ -1,0 +1,26 @@
+// Manual acceptance evidence; never interpreted as a live service health result.
+export const previewAcceptance20261008 = {
+  observedAt: "2026-10-08",
+  source: "Preview 73ed3c0 基底＋PV6工作區修補；人工證據不等同全功能驗收，v16-review 尚未套入主服務",
+  checks: [
+    [1, "Ragic API 同步", "UNVERIFIED", "有界分頁、同名拒配、本次同步結果及安全錯誤有118項隔離檢查；真來源、可靠ID與持久恢復仍待驗。"],
+    [2, "Ragic Webhook", "NOT_RUN", "尚未在此 Preview 驗收事件接收與恢復。"],
+    [3, "定位打卡", "NOT_APPLICABLE", "本協同課系統沒有定位打卡流程。"],
+    [4, "H01／H02 教練角色", "UNVERIFIED", "可靠人員對應與同名確認尚未完成。"],
+    [5, "操作時間軸", "BLOCKED", "現行 API 未提供紀錄；已唯讀核實 system_operation_logs 表不存在。"],
+    [6, "錯誤日誌", "BLOCKED", "持久 operational_events 表仍缺；API request ID／安全console／Ragic固定錯誤已有隔離修補，不能代替持久日誌。"],
+    [7, "載具／統編", "NOT_APPLICABLE", "本協同課沒有家長報名與開票流程。"],
+    [8, "台北時區", "UNVERIFIED", "畫面可顯示台北時間；備份與錯誤時間仍待端到端核對。"],
+    [9, "計價／收款／權益帳", "NOT_APPLICABLE", "本協同課沒有收款與扣堂帳務流程。"],
+    [10, "IT 管理監控", "UNVERIFIED", "唯讀監控、缺表unknown與資料保護狀態已有隔離修補；依本頁即時讀取顯示，AI與完整恢復仍未驗。"],
+    [11, "資料備份與還原", "NOT_RUN", "尚未在此環境做獨立還原演練。"],
+    [12, "Git 回退紀錄", "UNVERIFIED", "有既有版本；完整歷史隱私掃描與實際回退仍待驗。"],
+    [13, "資料品質與關聯", "UNVERIFIED", "合成課程保存、匯入、複製可讀回；全資料關聯仍待查核。"],
+    [14, "後端業務規則", "UNVERIFIED", "尚未完成此版本的全部非法輸入與競爭寫入驗收。"],
+    [15, "保存結果一致性", "UNVERIFIED", "合成課保存／匯入／複製／人數1→2→1有讀回證據；另補Ragic忙碌、寫入失敗與取消反例；真人指派、教師回饋及未知commit仍未驗。"],
+    [16, "效能與可用性", "NOT_RUN", "本次未做尖峰負載與重啟恢復測試。"],
+    [17, "教練 LINE 通知", "NOT_RUN", "人工入列前readiness及當次run派送有7組隔離證據；自動worker暫停，本次未入列／試送，入列不代表送達。"],
+    [18, "GitHub 定期推送", "BLOCKED", "排程維持 PAUSED，目的地與歷史隱私 gate 尚未放行。"],
+    [19, "Rust 核心模組化", "UNVERIFIED", "v16-review 有隔離測試證據；此主服務尚未套入新版。"],
+  ] as const,
+};
