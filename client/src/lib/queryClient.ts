@@ -1,4 +1,5 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
+import { askConfirm } from "@/components/confirm-popup";
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
@@ -99,8 +100,8 @@ export async function apiRequestWithConfirm(
     const body = await res.clone().json().catch(() => null);
     if (body?.code === "CONFIRM_REQUIRED" && Array.isArray(body.warnings)) {
       const warnings = body.warnings as ScheduleWarning[];
-      const lines = warnings.map((warning) => `• ${warning.message}`).join("\n");
-      if (!window.confirm(`請確認：\n${lines}\n\n仍要儲存嗎？`)) {
+      const confirmed = await askConfirm("請確認", warnings.map((warning) => warning.message));
+      if (!confirmed) {
         throw new Error("已取消，未儲存");
       }
       res = await send([...preconfirmed, ...warnings.map((warning) => warning.code)]);

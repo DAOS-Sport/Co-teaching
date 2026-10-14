@@ -18,6 +18,7 @@ import { zhTW } from "date-fns/locale";
 import FloatingConflictAlert from "@/components/floating-conflict-alert";
 import AdminLayout from "@/components/admin-layout";
 import { apiRequestWithConfirm, cachedScheduleVersion } from "@/lib/queryClient";
+import { askConfirm } from "@/components/confirm-popup";
 import { useLocation } from "wouter";
 import {
   AlertDialog,
@@ -523,7 +524,7 @@ function CoachAssignmentContent() {
     return scored.sort((a, b) => b.score - a.score).map((x) => x.coach);
   };
 
-  const handleAutoFill = () => {
+  const handleAutoFill = async () => {
     const unfilled = schedules.filter(
       (s) => s.className && s.venue.id === selectedVenue && (!s.coachName || ((s.coachCount || 1) >= 2 && !s.coachName2))
     );
@@ -575,13 +576,14 @@ function CoachAssignmentContent() {
     }
     // Ask once for the whole batch instead of once per row.
     const unavailable = picks.filter((pick) => !pick.available);
-    const accepted =
-      unavailable.length > 0 &&
-      !window.confirm(
-        `自動指派中有 ${unavailable.length} 筆教練沒有填該時段為可排：\n${unavailable.map((pick) => `• ${pick.label}`).join("\n")}\n\n仍要指派這些嗎？（取消則只指派有填可排的）`,
-      )
-        ? picks.filter((pick) => pick.available)
-        : picks;
+    const keepUnavailable =
+      unavailable.length === 0 ||
+      (await askConfirm(
+        `自動指派中有 ${unavailable.length} 筆教練沒有填該時段為可排（取消則只指派有填可排的）`,
+        unavailable.map((pick) => pick.label),
+        "仍要指派",
+      ));
+    const accepted = keepUnavailable ? picks : picks.filter((pick) => pick.available);
     for (const pick of accepted) {
       assignCoachMutation.mutate({
         scheduleId: pick.scheduleId,

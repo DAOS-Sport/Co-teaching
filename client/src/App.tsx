@@ -22,6 +22,7 @@ import Sop from "@/pages/sop";
 import ItGovernance from "@/pages/it-governance";
 import SchoolView from "@/pages/school-view";
 import PasswordProtect from "@/components/password-protect";
+import ConfirmPopupHost from "@/components/confirm-popup";
 
 // Single password gate for the entire admin area.
 // All /mgt-x9k7p2/* routes are rendered inside this component,
@@ -96,6 +97,7 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
+        <ConfirmPopupHost />
         <Router />
       </TooltipProvider>
     </QueryClientProvider>
