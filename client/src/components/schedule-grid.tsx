@@ -2,7 +2,7 @@ import { isPlaceholderCoach } from "@shared/scheduleRules";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequestWithConfirm } from "@/lib/queryClient";
 import CoachAutocomplete from "./coach-autocomplete";
 import type { Venue, TimeSlot, Schedule } from "@shared/schema";
 
@@ -35,7 +35,7 @@ export default function ScheduleGrid({ date }: ScheduleGridProps) {
       className: string;
       coachName: string;
     }) => {
-      const response = await apiRequest('POST', '/api/schedules', scheduleData);
+      const response = await apiRequestWithConfirm('POST', '/api/schedules', scheduleData);
       return response.json();
     },
     onSuccess: () => {

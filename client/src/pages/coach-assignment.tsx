@@ -17,6 +17,7 @@ import { format, addWeeks, subWeeks, startOfWeek } from "date-fns";
 import { zhTW } from "date-fns/locale";
 import FloatingConflictAlert from "@/components/floating-conflict-alert";
 import AdminLayout from "@/components/admin-layout";
+import { apiRequestWithConfirm } from "@/lib/queryClient";
 import { useLocation } from "wouter";
 import {
   AlertDialog,
@@ -407,26 +408,28 @@ function CoachAssignmentContent() {
 
   const assignCoachMutation = useMutation({
     mutationFn: async ({
-      scheduleId, coachName, coachName2, coach1IsTeaching, coach2IsTeaching,
+      scheduleId, coachName, coachName2, coach1IsTeaching, coach2IsTeaching, confirmWarnings,
     }: {
       scheduleId: string;
       coachName?: string;
       coachName2?: string;
       coach1IsTeaching?: boolean;
       coach2IsTeaching?: boolean;
+      confirmWarnings?: string[];
     }) => {
-      const adminPassword = sessionStorage.getItem("admin-password") || "";
-      const body: any = {};
+      const body: Record<string, unknown> = {};
       if (coachName !== undefined) body.coachName = coachName;
       if (coachName2 !== undefined) body.coachName2 = coachName2;
       if (coach1IsTeaching !== undefined) body.coach1IsTeaching = coach1IsTeaching;
       if (coach2IsTeaching !== undefined) body.coach2IsTeaching = coach2IsTeaching;
-      const res = await fetch(`/api/schedules/${scheduleId}/assign-coach`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "x-admin-password": adminPassword },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(await res.text());
+      // This page shows its own 衝堂提醒 before assigning, so the server's
+      // conflict check is pre-confirmed; availability is still asked.
+      const res = await apiRequestWithConfirm(
+        "PUT",
+        `/api/schedules/${scheduleId}/assign-coach`,
+        body,
+        confirmWarnings ?? ["COACH_CONFLICT"],
+      );
       return res.json();
     },
     onSuccess: () => {
@@ -520,7 +523,7 @@ function CoachAssignmentContent() {
     const unfilled = schedules.filter(
       (s) => s.className && s.venue.id === selectedVenue && (!s.coachName || ((s.coachCount || 1) >= 2 && !s.coachName2))
     );
-    let filled = 0;
+    const picks: { scheduleId: string; slot: "coachName" | "coachName2"; coach: string; available: boolean; label: string }[] = [];
     const localCounts: Record<string, number> = {};
     for (const coach of coaches) localCounts[coach] = weeklyStats[coach]?.assigned || 0;
     const venueName = selectedVenueData?.name || "";
@@ -550,10 +553,9 @@ function CoachAssignmentContent() {
         const candidates = scoredCandidates(dayOfWeek, timeSlotOrder, venueName, conflicting);
         if (candidates.length > 0) {
           const best = pickBest(candidates, timeAvailSet)!;
-          assignCoachMutation.mutate({ scheduleId: schedule.id, coachName: best });
+          picks.push({ scheduleId: schedule.id, slot: "coachName", coach: best, available: timeAvailSet.has(best), label: `${schedule.date} ${schedule.className || ""}：${best}` });
           localCounts[best] = (localCounts[best] || 0) + 1;
           assignedCoach1 = best;
-          filled++;
         }
       }
       if ((schedule.coachCount || 1) >= 2 && !schedule.coachName2) {
@@ -562,12 +564,28 @@ function CoachAssignmentContent() {
         const candidates2 = scoredCandidates(dayOfWeek, timeSlotOrder, venueName, exclude2);
         if (candidates2.length > 0) {
           const best2 = pickBest(candidates2, timeAvailSet)!;
-          assignCoachMutation.mutate({ scheduleId: schedule.id, coachName2: best2 });
+          picks.push({ scheduleId: schedule.id, slot: "coachName2", coach: best2, available: timeAvailSet.has(best2), label: `${schedule.date} ${schedule.className || ""}：${best2}` });
           localCounts[best2] = (localCounts[best2] || 0) + 1;
-          filled++;
         }
       }
     }
+    // Ask once for the whole batch instead of once per row.
+    const unavailable = picks.filter((pick) => !pick.available);
+    const accepted =
+      unavailable.length > 0 &&
+      !window.confirm(
+        `自動指派中有 ${unavailable.length} 筆教練沒有填該時段為可排：\n${unavailable.map((pick) => `• ${pick.label}`).join("\n")}\n\n仍要指派這些嗎？（取消則只指派有填可排的）`,
+      )
+        ? picks.filter((pick) => pick.available)
+        : picks;
+    for (const pick of accepted) {
+      assignCoachMutation.mutate({
+        scheduleId: pick.scheduleId,
+        [pick.slot]: pick.coach,
+        confirmWarnings: ["COACH_CONFLICT", "COACH_UNAVAILABLE"],
+      });
+    }
+    const filled = accepted.length;
     if (filled === 0) {
       toast({ title: "無可用教練", description: "沒有符合條件的教練可自動指派", variant: "destructive" });
     } else {

@@ -39,6 +39,49 @@ export async function apiRequest(
   return res;
 }
 
+interface ScheduleWarning {
+  code: string;
+  message: string;
+}
+
+/**
+ * apiRequest for schedule writes the server may hold for confirmation
+ * (409 CONFIRM_REQUIRED: coach conflict, or outside the coach's filled
+ * availability). Asks once; on OK resends with those codes confirmed,
+ * on cancel throws without saving. `preconfirmed` lists codes the page
+ * has already confirmed in its own UI.
+ */
+export async function apiRequestWithConfirm(
+  method: string,
+  url: string,
+  data: Record<string, unknown>,
+  preconfirmed: string[] = [],
+): Promise<Response> {
+  const send = (confirmWarnings: string[]) =>
+    fetch(url, {
+      method,
+      headers: { ...getAdminAuthHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ ...data, confirmWarnings }),
+      credentials: "include",
+    });
+
+  let res = await send(preconfirmed);
+  if (res.status === 409) {
+    const body = await res.clone().json().catch(() => null);
+    if (body?.code === "CONFIRM_REQUIRED" && Array.isArray(body.warnings)) {
+      const warnings = body.warnings as ScheduleWarning[];
+      const lines = warnings.map((warning) => `• ${warning.message}`).join("\n");
+      if (!window.confirm(`請確認：\n${lines}\n\n仍要儲存嗎？`)) {
+        throw new Error("已取消，未儲存");
+      }
+      res = await send([...preconfirmed, ...warnings.map((warning) => warning.code)]);
+    }
+  }
+
+  await throwIfResNotOk(res);
+  return res;
+}
+
 type UnauthorizedBehavior = "returnNull" | "throw";
 export const getQueryFn: <T>(options: {
   on401: UnauthorizedBehavior;

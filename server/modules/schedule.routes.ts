@@ -10,6 +10,12 @@ import {
 } from "./scheduleImport.service";
 import type { ScheduleImportMode } from "@shared/scheduleImport";
 import { promoteCoachSlots, sameCoach } from "@shared/scheduleRules";
+import {
+  SCHEDULE_LOCKED,
+  confirmRequired,
+  isVenueDateLocked,
+  pendingAssignmentWarnings,
+} from "./scheduleAssignmentGuard";
 
 type ScheduleUpdate = Parameters<typeof storage.updateSchedule>[1];
 const isDuplicateCoach = sameCoach;
@@ -39,6 +45,18 @@ export function registerScheduleRoutes(app: Express): void {
       if (isDuplicateCoach(validatedData.coachName, validatedData.coachName2)) {
         return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
       }
+      if (await isVenueDateLocked(validatedData.venueId, validatedData.date)) {
+        return res.status(409).json(SCHEDULE_LOCKED);
+      }
+      const pending = await pendingAssignmentWarnings({
+        scheduleId: null,
+        date: validatedData.date,
+        timeSlotId: validatedData.timeSlotId,
+        before: null,
+        after: validatedData,
+        confirmed: req.body?.confirmWarnings,
+      });
+      if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
       const schedule = await storage.upsertSchedule(validatedData);
       res.json(schedule);
     } catch (error) {
@@ -214,6 +232,15 @@ export function registerScheduleRoutes(app: Express): void {
         if (isDuplicateCoach(nextCoach1, nextCoach2)) {
           return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
         }
+        const pending = await pendingAssignmentWarnings({
+          scheduleId: existing.id,
+          date: existing.date,
+          timeSlotId: existing.timeSlotId,
+          before: existing,
+          after: { coachName: nextCoach1, coachName2: nextCoach2 },
+          confirmed: req.body?.confirmWarnings,
+        });
+        if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
 
         if (coachName2 !== undefined) {
           if (coachName2 && existing.coachCount < 2) {
@@ -275,6 +302,19 @@ export function registerScheduleRoutes(app: Express): void {
         if (isDuplicateCoach(coachName, existing.coachName2)) {
           return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
         }
+        // Locked weeks freeze class names; coach assignment stays open.
+        if (existing.isClassLocked && className !== undefined && className !== existing.className) {
+          return res.status(409).json(SCHEDULE_LOCKED);
+        }
+        const pending = await pendingAssignmentWarnings({
+          scheduleId: existing.id,
+          date: existing.date,
+          timeSlotId: existing.timeSlotId,
+          before: existing,
+          after: { coachName: coachName !== undefined ? coachName : existing.coachName, coachName2: existing.coachName2 },
+          confirmed: req.body?.confirmWarnings,
+        });
+        if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
         const updateData: ScheduleUpdate = { className, coachName };
         const promoted = promoteCoachSlots({
           coachName: coachName !== undefined ? coachName : existing.coachName,
@@ -335,6 +375,15 @@ export function registerScheduleRoutes(app: Express): void {
         if (isDuplicateCoach(nextCoach1, nextCoach2)) {
           return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
         }
+        const pending = await pendingAssignmentWarnings({
+          scheduleId: existing.id,
+          date: existing.date,
+          timeSlotId: existing.timeSlotId,
+          before: existing,
+          after: { coachName: nextCoach1, coachName2: nextCoach2 },
+          confirmed: req.body?.confirmWarnings,
+        });
+        if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
         // Never leave slot 2 filled while slot 1 is empty. The candidate is
         // read before the coachCount=1 rule nulls slot 2, so dropping to one
         // coach keeps the only coach on the card instead of deleting them.

@@ -2,7 +2,7 @@ import { isPlaceholderCoach } from "@shared/scheduleRules";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useRef, useImperativeHandle, forwardRef } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, apiRequestWithConfirm } from "@/lib/queryClient";
 import CoachAutocomplete from "./coach-autocomplete";
 import type { Venue, TimeSlot, Schedule } from "@shared/schema";
 import { format, addDays, startOfWeek } from "date-fns";
@@ -149,7 +149,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
         return null;
       }
       
-      const response = await apiRequest('POST', '/api/schedules', scheduleData);
+      const response = await apiRequestWithConfirm('POST', '/api/schedules', scheduleData);
       return response.json();
     },
     onSuccess: () => {
@@ -263,7 +263,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
       className: string;
       coachName: string;
     }) => {
-      const response = await apiRequest('PUT', `/api/schedules/${updateData.scheduleId}`, {
+      const response = await apiRequestWithConfirm('PUT', `/api/schedules/${updateData.scheduleId}`, {
         className: updateData.className,
         coachName: updateData.coachName,
       });
