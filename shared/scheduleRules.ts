@@ -98,15 +98,18 @@ export interface AssignmentWarning {
 }
 
 /**
- * Server-side version of the assignment page's checks. Names are compared
- * whole, as the assignment page does. A coach who filled no availability
- * this week is not flagged as unavailable.
+ * Server-side version of the assignment page's checks. A conflict is the
+ * same coach at another venue in the same period; two classes at the same
+ * venue are not one. Names are compared whole, as the assignment page
+ * does. A coach who filled no availability this week is not flagged.
  */
 export function findAssignmentWarnings(input: {
   scheduleId: string | null;
+  venueId: string;
   coaches: string[];
   sameSlotSchedules: {
     id: string;
+    venueId: string;
     coachName: string | null;
     coachName2: string | null;
     className?: string | null;
@@ -119,7 +122,10 @@ export function findAssignmentWarnings(input: {
   const warnings: AssignmentWarning[] = [];
   for (const coach of input.coaches) {
     const clashes = input.sameSlotSchedules.filter(
-      (row) => row.id !== input.scheduleId && (sameCoach(row.coachName, coach) || sameCoach(row.coachName2, coach)),
+      (row) =>
+        row.id !== input.scheduleId &&
+        row.venueId !== input.venueId &&
+        (sameCoach(row.coachName, coach) || sameCoach(row.coachName2, coach)),
     );
     if (clashes.length > 0) {
       const places = clashes.map((row) => `${row.venue?.name || "其他場館"}（${row.className || "未命名班級"}）`);

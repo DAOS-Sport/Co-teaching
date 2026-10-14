@@ -47,7 +47,9 @@ test("MCP: repeated placeholders, both slots, search, clear and replacement with
   assert.equal(rows[0].coachName, null);
   await assert.rejects(call("first", { coachName: "未核准" }), /已核准教練/);
   assert.deepEqual((await call("first", { coachName: "熊韋程" })).conflictWarnings, []);
-  const conflict = await call("second", { coachName: "熊韋程" });
+  // Two classes at the same venue in one period are not a conflict (#6 is cross-venue).
+  assert.deepEqual((await call("second", { coachName: "熊韋程" })).conflictWarnings, []);
+  const conflict = await call("third", { coachName: "熊韋程" });
   assert.equal(conflict.conflictWarnings[0].coachName, "熊韋程");
   await assert.rejects(call("second", { coachName2: "熊韋程" }), /同一位教練/);
 });

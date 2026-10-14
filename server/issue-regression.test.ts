@@ -104,6 +104,7 @@ test("#6 schedule writes enforce lock, conflict and availability rules on the se
     { ...base, id: "locked-row", venueId: "v1", className: "A班", coachName: null, isClassLocked: true, venue: { name: "場館一" } },
     { ...base, id: "other-venue", venueId: "v2", className: "B班", coachName: "王教練", isClassLocked: false, venue: { name: "場館二" } },
     { ...base, id: "dup-row", venueId: "v3", className: "C班", coachName: "王教練", isClassLocked: false, venue: { name: "場館三" } },
+    { ...base, id: "same-venue", venueId: "v1", className: "D班", coachName: "周教練", isClassLocked: true, venue: { name: "場館一" } },
   ];
   const availability = [
     { coachName: "陳教練", weekStart: "2026-10-12", dayOfWeek: 1, timeSlotOrder: 1 },
@@ -159,6 +160,7 @@ test("#6 schedule writes enforce lock, conflict and availability rules on the se
     // No availability filled at all, placeholders and unchanged coaches are not nagged.
     await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "張教練" });
     await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "000" });
+    await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "周教練" });
     await expectSaved("PUT", "/api/schedules/dup-row", { expectedVersion: 1, className: "C班改", coachName: "王教練" });
     await expectSaved("POST", "/api/schedules", { date: "2026-10-14", venueId: "v4", timeSlotId: "slot-3", className: "E班" });
   } finally {
@@ -234,4 +236,20 @@ test("#8 schedule writes need the version the editor saw; stale or concurrent sa
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
   }
+});
+
+test("#6 conflict list counts a coach only when the same period spans different venues", async () => {
+  const { ScheduleRepository } = await import("./repositories/schedule.repository");
+  const repo = new ScheduleRepository();
+  const row = (id: string, venue: string, coachName: string, timeSlotId = "slot-1") =>
+    ({ id, timeSlotId, coachName, coachName2: null, venue: { name: venue } });
+  Object.assign(repo, {
+    getSchedulesByDate: async () => [
+      row("a", "新北高中", "段考"), row("b", "新北高中", "段考"),
+      row("c", "新北高中", "鄭教練"), row("d", "新北高中", "鄭教練"),
+      row("e", "三民高中", "王教練"), row("f", "新北高中", "王教練"),
+    ],
+  });
+  const conflicts = await repo.getConflicts("2026-10-15");
+  assert.deepEqual(conflicts.map(c => [c.coachName, [...c.venues].sort()]), [["王教練", ["三民高中", "新北高中"]]]);
 });

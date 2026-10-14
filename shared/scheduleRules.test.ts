@@ -66,19 +66,27 @@ test("only coaches newly placed on a row are checked; 000 and 缺 are not people
 
 test("assignment warnings: same-slot clash on another row, and a filled week missing this slot", () => {
   const sameSlotSchedules = [
-    { id: "self", coachName: "王教練", coachName2: null, className: "A", venue: { name: "一館" } },
-    { id: "x", coachName: "林教練", coachName2: "王教練", className: "B", venue: { name: "二館" } },
-    { id: "y", coachName: "陳教練-李教練", coachName2: null, className: "C", venue: { name: "三館" } },
+    { id: "self", venueId: "v1", coachName: "王教練", coachName2: null, className: "A", venue: { name: "一館" } },
+    { id: "x", venueId: "v2", coachName: "林教練", coachName2: "王教練", className: "B", venue: { name: "二館" } },
+    { id: "y", venueId: "v3", coachName: "陳教練-李教練", coachName2: null, className: "C", venue: { name: "三館" } },
   ];
   const weekAvailability = [
     { coachName: "王教練", dayOfWeek: 3, timeSlotOrder: 2 },
     { coachName: "李教練", dayOfWeek: 1, timeSlotOrder: 1 },
   ];
-  const warnings = findAssignmentWarnings({ scheduleId: "self", coaches: ["王教練", "李教練", "張教練"], sameSlotSchedules, weekAvailability, dayOfWeek: 3, timeSlotOrder: 2 });
+  const warnings = findAssignmentWarnings({ scheduleId: "self", venueId: "v1", coaches: ["王教練", "李教練", "張教練"], sameSlotSchedules, weekAvailability, dayOfWeek: 3, timeSlotOrder: 2 });
   assert.deepEqual(warnings.map(w => [w.code, w.coachName]), [["COACH_CONFLICT", "王教練"], ["COACH_UNAVAILABLE", "李教練"]]);
   assert.match(warnings[0].message, /二館/);
   // Legacy combined names ("陳教練-李教練") are compared whole, as the assignment page does.
   assert.equal(unconfirmedWarnings(warnings, ["COACH_CONFLICT"]).length, 1);
   assert.equal(unconfirmedWarnings(warnings, ["COACH_CONFLICT", "COACH_UNAVAILABLE"]).length, 0);
   assert.equal(unconfirmedWarnings(warnings, "COACH_CONFLICT").length, 2);
+});
+
+test("a coach in two classes at the same venue and period is not a conflict (#6 is cross-venue)", () => {
+  const sameSlotSchedules = [
+    { id: "other-class", venueId: "v1", coachName: "王教練", coachName2: null, className: "B", venue: { name: "一館" } },
+  ];
+  const warnings = findAssignmentWarnings({ scheduleId: "self", venueId: "v1", coaches: ["王教練"], sameSlotSchedules, weekAvailability: [], dayOfWeek: 3, timeSlotOrder: 2 });
+  assert.deepEqual(warnings, []);
 });

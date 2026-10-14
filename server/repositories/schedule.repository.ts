@@ -305,10 +305,12 @@ export class ScheduleRepository {
       });
     });
 
+    // Only a clash across venues counts; two classes at one venue do not.
     coachTimeSlotMap.forEach((timeSlotMap, coachName) => {
       timeSlotMap.forEach((venueNames, timeSlotId) => {
-        if (venueNames.length > 1) {
-          conflicts.push({ coachName, timeSlotId, venues: venueNames });
+        const distinctVenues = Array.from(new Set(venueNames));
+        if (distinctVenues.length > 1) {
+          conflicts.push({ coachName, timeSlotId, venues: distinctVenues });
         }
       });
     });

@@ -358,10 +358,12 @@ function CoachAssignmentContent() {
     return result;
   };
 
+  // Same coach at another venue in the same period; the same venue is fine.
   const getConflictingCoaches = (
     date: string,
     timeSlotId: string,
-    currentScheduleId: string
+    currentScheduleId: string,
+    venueId: string
   ): Map<string, ConflictDetail[]> => {
     const conflicting = new Map<string, ConflictDetail[]>();
     const push = (name: string, detail: ConflictDetail) => {
@@ -372,6 +374,7 @@ function CoachAssignmentContent() {
     };
     allSchedules.forEach((s) => {
       if (s.id === currentScheduleId || s.date !== date || s.timeSlotId !== timeSlotId) return;
+      if (s.venueId === venueId) return;
       const detail: ConflictDetail = {
         venueName: s.venue?.name || "",
         className: s.className || "(未命名班級)",
@@ -383,14 +386,14 @@ function CoachAssignmentContent() {
   };
 
   const getCoach1Conflicts = (schedule: Schedule & { venue: Venue; timeSlot: TimeSlot }) => {
-    const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id);
+    const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id, schedule.venueId);
     const hardDisabled = new Set<string>();
     if (isRealCoachName(schedule.coachName2)) hardDisabled.add(schedule.coachName2);
     return { softConflicts, hardDisabled };
   };
 
   const getCoach2Conflicts = (schedule: Schedule & { venue: Venue; timeSlot: TimeSlot }) => {
-    const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id);
+    const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id, schedule.venueId);
     const hardDisabled = new Set<string>();
     if (isRealCoachName(schedule.coachName)) hardDisabled.add(schedule.coachName);
     return { softConflicts, hardDisabled };
@@ -547,7 +550,7 @@ function CoachAssignmentContent() {
       const dayOfWeek = date.getDay() === 0 ? 7 : date.getDay();
       const timeSlotOrder = schedule.timeSlot?.order || 0;
       const timeAvailSet = availabilityMap.get(`${dayOfWeek}-${timeSlotOrder}`) || new Set<string>();
-      const conflictingMap = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id);
+      const conflictingMap = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id, schedule.venueId);
       const conflicting = new Set<string>(conflictingMap.keys());
       let assignedCoach1 = schedule.coachName || "";
       if (!schedule.coachName) {

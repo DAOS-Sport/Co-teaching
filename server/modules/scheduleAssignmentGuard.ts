@@ -31,6 +31,7 @@ export async function isVenueDateLocked(venueId: string, date: string): Promise<
  */
 export async function pendingAssignmentWarnings(input: {
   scheduleId: string | null;
+  venueId: string;
   date: string;
   timeSlotId: string;
   before: CoachPair | null;
@@ -46,6 +47,7 @@ export async function pendingAssignmentWarnings(input: {
   ]);
   const warnings = findAssignmentWarnings({
     scheduleId: input.scheduleId,
+    venueId: input.venueId,
     coaches,
     sameSlotSchedules: sameDay.filter((row) => row.timeSlotId === input.timeSlotId),
     weekAvailability,

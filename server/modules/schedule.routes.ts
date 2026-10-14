@@ -62,6 +62,7 @@ export function registerScheduleRoutes(app: Express): void {
       }
       const pending = await pendingAssignmentWarnings({
         scheduleId: null,
+        venueId: validatedData.venueId,
         date: validatedData.date,
         timeSlotId: validatedData.timeSlotId,
         before: null,
@@ -249,6 +250,7 @@ export function registerScheduleRoutes(app: Express): void {
         }
         const pending = await pendingAssignmentWarnings({
           scheduleId: existing.id,
+          venueId: existing.venueId,
           date: existing.date,
           timeSlotId: existing.timeSlotId,
           before: existing,
@@ -328,6 +330,7 @@ export function registerScheduleRoutes(app: Express): void {
         }
         const pending = await pendingAssignmentWarnings({
           scheduleId: existing.id,
+          venueId: existing.venueId,
           date: existing.date,
           timeSlotId: existing.timeSlotId,
           before: existing,
@@ -401,6 +404,7 @@ export function registerScheduleRoutes(app: Express): void {
         }
         const pending = await pendingAssignmentWarnings({
           scheduleId: existing.id,
+          venueId: existing.venueId,
           date: existing.date,
           timeSlotId: existing.timeSlotId,
           before: existing,
