@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import AdminLayout from "@/components/admin-layout";
 import { Badge } from "@/components/ui/badge";
@@ -210,8 +210,8 @@ function describeChange(before: unknown, after: unknown): string[] {
 
 function Panel({ title, icon, right, children }: { title: string; icon: string; right?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <section className="flex min-h-0 flex-1 flex-col rounded-lg border bg-card">
-      <header className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
+    <section className="flex min-h-0 flex-1 flex-col rounded-xl border bg-card shadow-sm">
+      <header className="flex shrink-0 items-center justify-between gap-2 border-b px-4 py-3">
         <h2 className="flex items-center gap-2 text-sm font-semibold">
           <i className={`fas ${icon} text-muted-foreground`}></i>
           {title}
@@ -249,13 +249,13 @@ function ActivityPanel() {
         </div>
       }
     >
-      {isError && <p className="p-3 text-xs text-destructive">活動紀錄載入失敗</p>}
-      {!isError && rows.length === 0 && <p className="p-3 text-xs text-muted-foreground">目前沒有紀錄</p>}
+      {isError && <p className="px-4 py-3 text-xs text-destructive">活動紀錄載入失敗</p>}
+      {!isError && rows.length === 0 && <p className="px-4 py-3 text-xs text-muted-foreground">目前沒有紀錄</p>}
       <ul className="divide-y">
         {rows.map((row) => {
           const changes = describeChange(row.beforeData, row.afterData);
           return (
-            <li key={row.id} className="px-3 py-2 text-xs">
+            <li key={row.id} className="px-4 py-2.5 text-xs">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                 <span className="font-mono text-muted-foreground">{taipei(row.occurredAt)}</span>
                 <span className="font-medium">{ACTION_LABELS[row.action] ?? row.action}</span>
@@ -280,7 +280,7 @@ function ActivityPanel() {
 function LogLine({ row }: { row: LogRow }) {
   const isError = row.level === "error";
   return (
-    <li className={`px-3 py-2 text-xs ${isError ? "bg-red-50 dark:bg-red-950/30" : ""}`}>
+    <li className={`px-4 py-2.5 text-xs ${isError ? "bg-red-50 dark:bg-red-950/30" : ""}`}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
         <span className="font-mono text-muted-foreground">{taipei(row.occurredAt)}</span>
         <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${isError ? "bg-red-600 text-white" : row.level === "warn" ? "bg-gray-200 text-gray-700" : "bg-blue-100 text-blue-700"}`}>
@@ -318,7 +318,7 @@ function LogPanel() {
         </span>
       }
     >
-      {isError && <p className="p-3 text-xs text-destructive">日誌載入失敗</p>}
+      {isError && <p className="px-4 py-3 text-xs text-destructive">日誌載入失敗</p>}
       {errors.length > 0 && (
         <>
           <div className="sticky top-0 z-10 bg-red-600 px-3 py-1 text-[11px] font-semibold text-white">錯誤（優先處理）</div>
@@ -330,7 +330,7 @@ function LogPanel() {
         </>
       )}
       <div className="sticky top-0 z-10 bg-muted px-3 py-1 text-[11px] font-semibold text-muted-foreground">其他紀錄</div>
-      {!isError && others.length === 0 && <p className="p-3 text-xs text-muted-foreground">目前沒有紀錄</p>}
+      {!isError && others.length === 0 && <p className="px-4 py-3 text-xs text-muted-foreground">目前沒有紀錄</p>}
       <ul className="divide-y">
         {others.map((row) => (
           <LogLine key={row.id} row={row} />
@@ -348,19 +348,19 @@ function RagicRunsSection() {
   });
   const runs = data?.runs ?? [];
   return (
-    <section className="rounded-lg border bg-card">
-      <header className="flex items-center gap-2 border-b px-3 py-2">
+    <section className="rounded-xl border bg-card shadow-sm">
+      <header className="flex items-center gap-2 border-b px-4 py-3">
         <i className="fas fa-rotate text-muted-foreground"></i>
         <h2 className="text-sm font-semibold">Ragic 同步紀錄</h2>
         <span className="text-xs text-muted-foreground">失敗與中斷的排前面</span>
       </header>
-      {isError && <p className="p-3 text-xs text-destructive">同步紀錄載入失敗</p>}
-      {!isError && runs.length === 0 && <p className="p-3 text-xs text-muted-foreground">尚無同步紀錄（新版上線後的第一次同步開始記錄）</p>}
+      {isError && <p className="px-4 py-3 text-xs text-destructive">同步紀錄載入失敗</p>}
+      {!isError && runs.length === 0 && <p className="px-4 py-3 text-xs text-muted-foreground">尚無同步紀錄（新版上線後的第一次同步開始記錄）</p>}
       <ul className="divide-y">
         {runs.map((run) => {
           const st = RUN_STATUS[run.displayStatus] ?? { label: run.displayStatus, color: "bg-gray-100 text-gray-700" };
           return (
-            <li key={run.id} className="px-3 py-2 text-xs">
+            <li key={run.id} className="px-4 py-2.5 text-xs">
               <details open={run.items.length > 0 && run.displayStatus !== "success"}>
                 <summary className="flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-0.5">
                   <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${st.color}`}>{st.label}</span>
@@ -389,33 +389,86 @@ function RagicRunsSection() {
   );
 }
 
-function ServicesSection({ services }: { services: ServiceStatus[] }) {
+function ServiceChips({ services }: { services: ServiceStatus[] }) {
+  const [openId, setOpenId] = useState<string | null>(null);
   const sorted = [...services].sort((a, b) => SERVICE_STATUS[a.status].rank - SERVICE_STATUS[b.status].rank);
+  const open = sorted.find((svc) => svc.id === openId) ?? null;
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
   return (
-    <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-      {sorted.map((svc) => {
-        const st = SERVICE_STATUS[svc.status];
-        return (
-          <div key={svc.id} className={`flex flex-col gap-1 rounded-lg border bg-card px-3 py-2 ${st.rank === 0 ? "border-red-300" : ""}`}>
-            <div className="flex items-start justify-between gap-2">
-              <span className="text-sm font-semibold leading-snug">{svc.name}</span>
-              <span className={`flex shrink-0 items-center gap-1 text-xs font-medium ${st.color}`}>
-                <i className={`fas ${st.icon} text-xs`}></i>
-                {st.label}
+    <>
+      <div className="flex shrink-0 flex-wrap gap-2">
+        {sorted.map((svc) => {
+          const st = SERVICE_STATUS[svc.status];
+          return (
+            <button
+              key={svc.id}
+              onClick={() => setOpenId(svc.id)}
+              className={`inline-flex items-center gap-2 rounded-full border bg-card px-3 py-1.5 text-sm shadow-sm hover:bg-muted ${st.rank === 0 ? "border-red-300" : ""}`}
+            >
+              <i className={`fas ${st.icon} text-xs ${st.color}`}></i>
+              <span className="font-medium">{svc.name}</span>
+              <span className={`text-xs ${st.color}`}>{st.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/30 p-4"
+          onClick={() => setOpenId(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={open.name}
+            onClick={(event) => event.stopPropagation()}
+            className="flex max-h-full w-[440px] max-w-full flex-col rounded-xl border bg-card p-5 shadow-2xl"
+          >
+            <div className="flex shrink-0 items-start justify-between gap-3">
+              <h3 className="text-base font-semibold">{open.name}</h3>
+              <span className={`flex shrink-0 items-center gap-1 text-sm font-medium ${SERVICE_STATUS[open.status].color}`}>
+                <i className={`fas ${SERVICE_STATUS[open.status].icon} text-xs`}></i>
+                {SERVICE_STATUS[open.status].label}
               </span>
             </div>
-            <p className="text-[11px] text-muted-foreground">{svc.description}</p>
-            {svc.checkedAt && <p className="text-[11px] text-muted-foreground">檢查：{taipei(svc.checkedAt)}</p>}
-            {svc.lastSyncTime && (
-              <p className="text-[11px] text-muted-foreground">
-                上次同步：{taipei(svc.lastSyncTime)}
-                {svc.isSyncing && <span className="ml-1 animate-pulse text-blue-600">同步中…</span>}
-              </p>
-            )}
+            <div className="mt-3 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto text-sm text-muted-foreground">
+              <p>{open.description}</p>
+              {open.checkedAt && <p>檢查時間：{taipei(open.checkedAt)}（台北）</p>}
+              {open.code && <p>檢查結果代碼：<span className="font-mono">{open.code}</span></p>}
+              {open.lastSyncTime && (
+                <p>
+                  上次同步：{taipei(open.lastSyncTime)}
+                  {open.isSyncing && <span className="ml-1 animate-pulse text-blue-600">同步中…</span>}
+                </p>
+              )}
+              {open.endpoints && open.endpoints.length > 0 && (
+                <div className="space-y-1">
+                  <p className="text-xs font-semibold text-foreground">相關 API</p>
+                  {open.endpoints.map((ep) => (
+                    <code key={ep} className="block truncate rounded bg-muted px-2 py-1 font-mono text-xs">{ep}</code>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="mt-4 flex shrink-0 justify-end">
+              <button onClick={() => setOpenId(null)} className="rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
+                關閉
+              </button>
+            </div>
           </div>
-        );
-      })}
-    </section>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -441,8 +494,8 @@ function ApiCatalogSection({ groups, stats }: { groups: ApiGroup[]; stats: Endpo
   const total = groups.reduce((n, g) => n + g.endpoints.length, 0);
 
   return (
-    <details className="rounded-lg border bg-card">
-      <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm font-semibold">
+    <details className="rounded-xl border bg-card shadow-sm">
+      <summary className="flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-semibold">
         <i className="fas fa-code text-muted-foreground"></i>
         API 端點目錄
         <span className="text-xs font-normal text-muted-foreground">
@@ -482,8 +535,8 @@ function ApiCatalogSection({ groups, stats }: { groups: ApiGroup[]; stats: Endpo
 
 function ReferenceSection({ flags }: { flags: Record<string, boolean> }) {
   return (
-    <details className="rounded-lg border bg-card">
-      <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm font-semibold">
+    <details className="rounded-xl border bg-card shadow-sm">
+      <summary className="flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-semibold">
         <i className="fas fa-book text-muted-foreground"></i>
         功能旗標與認證方式
       </summary>
@@ -533,9 +586,9 @@ export default function ItGovernancePage() {
 
   return (
     <AdminLayout activeTab="it-governance">
-      <div className="flex min-h-full flex-col gap-3 p-3">
+      <div className="mx-auto flex min-h-full w-full max-w-[1440px] flex-col gap-5 px-4 py-5 sm:px-6">
         {/* Summary bar */}
-        <header className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border bg-card px-3 py-2">
+        <header className="flex shrink-0 flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border bg-card px-5 py-3 shadow-sm">
           <h1 className="flex items-center gap-2 text-base font-bold">
             <i className="fas fa-shield-halved text-primary"></i>
             IT 治理
@@ -552,16 +605,17 @@ export default function ItGovernancePage() {
           </span>
         </header>
 
+        {data && <ServiceChips services={services} />}
+
         {isLoading && <p className="py-10 text-center text-sm text-muted-foreground">載入中…</p>}
         {isError && <p className="py-10 text-center text-sm text-destructive">載入失敗，請確認管理員密碼是否正確</p>}
 
         {/* Activity + log: side by side, each scrolls on its own */}
-        <div className="flex min-h-[420px] shrink-0 flex-col gap-3 lg:h-[62vh] lg:flex-row">
+        <div className="flex min-h-[360px] shrink-0 flex-col gap-5 lg:h-[52vh] lg:flex-row">
           <ActivityPanel />
           <LogPanel />
         </div>
 
-        {data && <ServicesSection services={services} />}
         <RagicRunsSection />
         {data && <ApiCatalogSection groups={data.apiGroups} stats={stats?.rows ?? []} />}
         {data && <ReferenceSection flags={data.featureFlags} />}
