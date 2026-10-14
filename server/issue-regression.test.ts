@@ -253,3 +253,126 @@ test("#6 conflict list counts a coach only when the same period spans different 
   const conflicts = await repo.getConflicts("2026-10-15");
   assert.deepEqual(conflicts.map(c => [c.coachName, [...c.venues].sort()]), [["王教練", ["三民高中", "新北高中"]]]);
 });
+
+test("#1 Ragic sync keeps failed items, refuses to merge same-name rows and reports a partial run", async () => {
+  process.env.RAGIC_API_KEY ??= "test-key";
+  const ragic = await import("./ragic");
+  const { storage } = await import("./storage");
+  const LINE_TAKEN = "U" + "0123456789abcdef".repeat(2);
+  const sheets: Record<string, object> = {
+    "ragicforms4/7": { "1": { _ragicId: 1, 部門名稱: "既有場館", 營運性質: "" } },
+    "general-information/23": {
+      "11": { _ragicId: 11, 姓名: "新教練甲", 應徵職務: "教練" },
+      "12": { _ragicId: 12, 姓名: "同名教練", 應徵職務: "教練" },
+      "13": { _ragicId: 13, 姓名: "同名教練", 應徵職務: "教練" },
+      "14": { _ragicId: 14, 姓名: "既有教練乙", 應徵職務: "教練" },
+    },
+    "ragicforms4/20004": {
+      "21": { _ragicId: 21, 姓名: "既有教練乙", "個人LINE ID": LINE_TAKEN },
+    },
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    const key = Object.keys(sheets).find((k) => String(url).includes(k));
+    return new Response(JSON.stringify(key ? sheets[key] : {}), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  const created: string[] = [];
+  Object.assign(storage, {
+    getVenues: async () => [{ id: "v", name: "既有場館", color: "blue", order: 1 }],
+    getAllVenueInfos: async () => [],
+    getAllCoachUsers: async () => [
+      { id: "owner", name: "別人", status: "approved", lineId: LINE_TAKEN, employeeId: null, createdAt: new Date(0) },
+      { id: "b", name: "既有教練乙", status: "approved", lineId: null, employeeId: "E1", createdAt: new Date(0) },
+    ],
+    createCoachUser: async (data: { name: string }) => { created.push(data.name); return { id: `new-${data.name}`, lineId: null, ...data }; },
+    updateCoachUserLineId: async () => { throw new Error("must not rebind a LINE ID owned by someone else"); },
+    updateCoachEmployeeId: async () => undefined,
+  });
+  const runs: { trigger: string; outcome?: { status: string; failures: { code: string; sourceId: string }[]; errorCode?: string | null } }[] = [];
+  ragic.setRagicRunStoreForTest({
+    start: async (trigger) => { runs.push({ trigger }); return `run-${runs.length}`; },
+    finish: async (_id, outcome) => { runs[runs.length - 1].outcome = outcome; },
+  });
+  try {
+    ragic.setRagicSyncLockForTest(async () => ({ release: async () => {} }));
+    await ragic.syncRagicAll("manual");
+    assert.deepEqual(created, ["新教練甲"], "same-name rows must not create or merge accounts");
+    const outcome = runs.at(-1)!.outcome!;
+    assert.equal(runs.at(-1)!.trigger, "manual");
+    assert.equal(outcome.status, "partial_failed");
+    assert.deepEqual(outcome.failures.map((f) => `${f.code}:${f.sourceId}`).sort(),
+      ["DUPLICATE_NAME_IN_RAGIC:12", "DUPLICATE_NAME_IN_RAGIC:13", "LINE_ID_TAKEN:14"]);
+    assert.ok(ragic.getRagicSyncStatus().lastError, "a partial run must not look like a clean success");
+
+    // Another instance already holds the sync lock: this one starts no run.
+    const before = runs.length;
+    ragic.setRagicSyncLockForTest(async () => null);
+    await ragic.syncRagicAll("startup");
+    assert.equal(runs.length, before);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("API log keeps route templates only, splits errors from refusals, skips the IT page and never blocks", async () => {
+  const express = (await import("express")).default;
+  const { apiLogMiddleware, setAppLogWriterForTest, flushAppLogForTest, appLogQueueStats, recordAppLog, UNMATCHED_ROUTE } = await import("./shared/appLog");
+  const rows: { level: string; route?: string | null; status?: number | null }[] = [];
+  setAppLogWriterForTest(async (entries) => { rows.push(...entries); });
+  const app = express();
+  app.use(apiLogMiddleware);
+  app.get("/api/coach-portal/me/:identifier", (_req, res) => { res.status(500).json({ message: "boom" }); });
+  app.get("/api/schedules", (_req, res) => { res.status(409).json({ message: "locked" }); });
+  app.get("/api/venues", (_req, res) => { res.json([]); });
+  app.get("/api/admin/it/logs", (_req, res) => { res.status(401).json({ message: "需要管理員密碼" }); });
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  try {
+    const secretId = "U" + "0123456789abcdef".repeat(2);
+    const res = await fetch(`${url}/api/coach-portal/me/${secretId}?password=secret`);
+    assert.ok(res.headers.get("x-request-id"));
+    await fetch(`${url}/api/schedules?coachName=王教練`);
+    await fetch(`${url}/api/venues`);
+    await fetch(`${url}/api/admin/it/logs`);
+    await fetch(`${url}/api/no-such-thing/${secretId}`);
+    await flushAppLogForTest();
+    assert.deepEqual(rows.map((r) => [r.level, r.route, r.status]), [
+      ["error", "/api/coach-portal/me/:identifier", 500],
+      ["warn", "/api/schedules", 409],
+      ["warn", UNMATCHED_ROUTE, 404],
+    ]);
+    assert.ok(!JSON.stringify(rows).includes(secretId) && !JSON.stringify(rows).includes("secret") && !JSON.stringify(rows).includes("王教練"));
+
+    // A stuck database must not pile up requests: the queue is bounded and drops the overflow.
+    setAppLogWriterForTest(() => new Promise(() => {}));
+    for (let i = 0; i < 700; i++) recordAppLog({ level: "error", source: "api" });
+    assert.ok(appLogQueueStats().dropped > 0);
+    assert.ok(appLogQueueStats().pending <= 500);
+  } finally {
+    setAppLogWriterForTest(async () => {});
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+  }
+});
+
+test("IT page data endpoints need the admin password; problem Ragic runs sort first", async () => {
+  const express = (await import("express")).default;
+  const { registerItObservabilityRoutes, runPriority } = await import("./modules/itObservability.routes");
+  const app = express();
+  registerItObservabilityRoutes(app);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  try {
+    for (const path of ["/api/admin/it/activity", "/api/admin/it/logs", "/api/admin/it/ragic-runs", "/api/admin/it/endpoint-stats"]) {
+      assert.equal((await fetch(url + path)).status, 401, path);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+  }
+  const order = ["success", "partial_failed", "running", "interrupted", "failed"].sort((a, b) => runPriority(a) - runPriority(b));
+  assert.deepEqual(order.slice(0, 2).sort(), ["failed", "interrupted"]);
+  assert.deepEqual(order.slice(2), ["partial_failed", "running", "success"]);
+});

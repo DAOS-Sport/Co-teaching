@@ -1,7 +1,9 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   index,
+  uuid,
   jsonb,
   pgTable,
   timestamp,
@@ -469,3 +471,61 @@ export type InsertCoachAvailability = typeof coachAvailability.$inferInsert;
 export type CoachVenuePreference = typeof coachVenuePreferences.$inferSelect;
 export type LineNotifyLog = typeof lineNotifyLogs.$inferSelect;
 export type InsertLineNotifyLog = typeof lineNotifyLogs.$inferInsert;
+
+// ─── IT page: operation timeline (#3), system log, Ragic sync runs (#1) ───
+// Created by migrations/manual/20261014_batch2.sql and 20261015_app_log.sql;
+// rows older than 90 days are removed by server/shared/logRetention.ts.
+export const operationAudit = pgTable("operation_audit", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  actor: text("actor").notNull(),
+  requestId: text("request_id"),
+  action: text("action").notNull(),
+  entity: text("entity").notNull(),
+  entityId: text("entity_id").notNull(),
+  beforeData: jsonb("before_data"),
+  afterData: jsonb("after_data"),
+  reason: text("reason"),
+});
+
+export const appLog = pgTable("app_log", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+  level: text("level").notNull(),
+  source: text("source").notNull(),
+  code: text("code"),
+  message: text("message"),
+  method: text("method"),
+  route: text("route"),
+  status: integer("status"),
+  requestId: text("request_id"),
+  detail: jsonb("detail"),
+});
+
+export const ragicSyncRuns = pgTable("ragic_sync_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  trigger: text("trigger").notNull(),
+  status: text("status").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  totalCount: integer("total_count").notNull().default(0),
+  successCount: integer("success_count").notNull().default(0),
+  failureCount: integer("failure_count").notNull().default(0),
+  errorCode: text("error_code"),
+});
+
+export const ragicSyncItems = pgTable("ragic_sync_items", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  runId: uuid("run_id").notNull().references(() => ragicSyncRuns.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  sourceId: text("source_id").notNull(),
+  status: text("status").notNull(),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type OperationAudit = typeof operationAudit.$inferSelect;
+export type AppLog = typeof appLog.$inferSelect;
+export type RagicSyncRun = typeof ragicSyncRuns.$inferSelect;
+export type RagicSyncItem = typeof ragicSyncItems.$inferSelect;

@@ -26,6 +26,7 @@ import { setupReportCleanupCron } from "./modules/weeklyPush/weeklyPush.cleanup"
 import { registerRemoteMcpRoutes } from "./mcp/remoteMcp.routes";
 import { registerSchedulingMcpRoutes } from "./mcp/schedulingMcp.routes";
 import { registerSchedulingOAuthRoutes } from "./mcp/schedulingOAuth";
+import { setupLogRetention } from "./shared/logRetention";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // 0. Fail fast on missing config (esp. ADMIN_PASSWORD in production)
@@ -60,7 +61,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // 6. Weekly push queue + worker + cron (Task #23). All gated.
   await startWeeklyPushQueue();
 
-  // 7. Report cleanup cron — only when weekly push is enabled
+  // 7. Drop activity / log / Ragic-run rows older than 90 days
+  setupLogRetention();
+
+  // 8. Report cleanup cron — only when weekly push is enabled
   if (featureFlags.enableWeeklyPushQueue) {
     setupReportCleanupCron();
   }

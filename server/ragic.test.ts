@@ -4,6 +4,9 @@ import {
   type CoachLike,
   compareCoachPriority,
   decideVenue,
+  displayRunStatus,
+  runStatusFor,
+  splitDuplicateNames,
   field,
   indexCoachUsersByLineId,
   indexCoachUsersByName,
@@ -137,4 +140,21 @@ test("normalizeLineId: accepts only real LINE user ids", () => {
   assert.equal(normalizeLineId("蘇允湛"), null);
   assert.equal(normalizeLineId(""), null);
   assert.equal(normalizeLineId("X" + "0".repeat(32)), null);
+});
+
+test("#1 Ragic rows sharing a 姓名 are all held back instead of merged into one account", () => {
+  const rows = [{ id: 1, name: "王小明" }, { id: 2, name: "陳大華" }, { id: 3, name: "王小明" }, { id: 4, name: " 陳大華 " }, { id: 5, name: "林一" }];
+  const { unique, duplicates } = splitDuplicateNames(rows, (r) => r.name);
+  assert.deepEqual(unique.map((r) => r.id), [5]);
+  assert.deepEqual(duplicates.map((r) => r.id).sort(), [1, 2, 3, 4]);
+});
+
+test("#1 a run with any failed item is partial, never success; an aborted run is failed", () => {
+  assert.equal(runStatusFor(0, false), "success");
+  assert.equal(runStatusFor(3, false), "partial_failed");
+  assert.equal(runStatusFor(0, true), "failed");
+  const startedAt = new Date("2026-10-15T01:00:00Z");
+  assert.equal(displayRunStatus({ status: "running", startedAt }, new Date("2026-10-15T01:10:00Z")), "running");
+  assert.equal(displayRunStatus({ status: "running", startedAt }, new Date("2026-10-15T01:31:00Z")), "interrupted");
+  assert.equal(displayRunStatus({ status: "partial_failed", startedAt }, new Date("2026-10-15T09:00:00Z")), "partial_failed");
 });

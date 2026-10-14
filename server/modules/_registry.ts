@@ -24,6 +24,7 @@ import { registerSchoolRoutes } from "./school.routes";
 import { registerDiagnosticRoutes } from "./diagnostic.routes";
 import { registerWeeklyPushRoutes } from "./weeklyPush/weeklyPush.routes";
 import { registerItGovernanceRoutes } from "./itGovernance.routes";
+import { registerItObservabilityRoutes } from "./itObservability.routes";
 import { featureFlags } from "../config/featureFlags";
 
 export function registerAllModules(app: Express): void {
@@ -70,4 +71,5 @@ export function registerAllModules(app: Express): void {
   // Operational endpoints
   registerDiagnosticRoutes(app);
   registerItGovernanceRoutes(app);
+  registerItObservabilityRoutes(app);
 }

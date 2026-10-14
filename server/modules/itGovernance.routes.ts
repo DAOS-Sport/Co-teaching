@@ -113,7 +113,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         group: "課表管理",
         endpoints: [
           { method: "GET", path: "/api/schedules", description: "依日期範圍查詢課表", auth: "none" },
-          { method: "POST", path: "/api/schedules", description: "新增或更新課程記錄", auth: "none" },
+          { method: "POST", path: "/api/schedules", description: "新增課程記錄", auth: "admin" },
           { method: "GET", path: "/api/schedules/lock-status", description: "檢查課表是否已鎖定", auth: "none" },
           { method: "POST", path: "/api/schedules/copy-week", description: "複製整週課表", auth: "admin" },
           { method: "POST", path: "/api/schedules/lock", description: "鎖定場館週課表", auth: "admin" },
@@ -132,7 +132,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         group: "教練管理",
         endpoints: [
           { method: "GET", path: "/api/coaches", description: "所有教練姓名清單", auth: "none" },
-          { method: "GET", path: "/api/approved-coaches", description: "已核准教練帳號清單", auth: "none" },
+          { method: "GET", path: "/api/approved-coaches", description: "已核准教練姓名清單", auth: "admin" },
           { method: "GET", path: "/api/coach-schedules", description: "特定教練的課程紀錄", auth: "none" },
           { method: "GET", path: "/api/coach-availability", description: "教練當週可用時段", auth: "none" },
           { method: "GET", path: "/api/admin/coach-venue-preferences", description: "所有教練場館偏好", auth: "admin" },
@@ -188,6 +188,16 @@ export function registerItGovernanceRoutes(app: Express): void {
           { method: "GET", path: "/api/admin/weekly-push/runs/:runId", description: "單次執行詳情與收件人狀態", auth: "admin" },
           { method: "GET", path: "/api/admin/weekly-push/runs/:runId/report", description: "下載 CSV 或 XLSX 報告", auth: "admin" },
           { method: "POST", path: "/api/admin/weekly-push/runs/:runId/retry-failed", description: "重試失敗的收件人", auth: "admin" },
+        ],
+      },
+      {
+        group: "IT 治理與紀錄",
+        endpoints: [
+          { method: "GET", path: "/api/admin/it-governance", description: "服務狀態與 API 目錄", auth: "admin" },
+          { method: "GET", path: "/api/admin/it/activity", description: "操作紀錄（課表、場館、教練、觸發）", auth: "admin" },
+          { method: "GET", path: "/api/admin/it/logs", description: "系統日誌（錯誤置頂）", auth: "admin" },
+          { method: "GET", path: "/api/admin/it/ragic-runs", description: "Ragic 同步紀錄與失敗明細", auth: "admin" },
+          { method: "GET", path: "/api/admin/it/endpoint-stats", description: "各 API 近 7 天錯誤與拒絕次數", auth: "admin" },
         ],
       },
       {

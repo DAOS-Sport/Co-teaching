@@ -1,10 +1,13 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { apiLogMiddleware } from "./shared/appLog";
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+// Records /api errors and refusals for the IT page (route template only).
+app.use(apiLogMiddleware);
 
 app.use((req, res, next) => {
   const start = Date.now();

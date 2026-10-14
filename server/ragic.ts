@@ -1,5 +1,10 @@
 import cron from "node-cron";
+import { eq } from "drizzle-orm";
 import { storage } from "./storage";
+import { db, pool } from "./db";
+import type { PoolClient } from "@neondatabase/serverless";
+import { ragicSyncItems, ragicSyncRuns } from "@shared/schema";
+import { recordAppLog } from "./shared/appLog";
 import { fetchWithTimeout } from "./shared/http/fetchWithTimeout";
 import {
   type RagicRecord,
@@ -10,6 +15,9 @@ import {
   isCoachRole,
   normalizeLineId,
   parseRagicBody,
+  runStatusFor,
+  splitDuplicateNames,
+  type RagicRunStatus,
 } from "./ragic.logic";
 
 const RAGIC_DEPT_API_URL = "https://ap7.ragic.com/xinsheng/ragicforms4/7";
@@ -41,6 +49,123 @@ export function getRagicSyncStatus() {
 }
 
 const errMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+export type SyncTrigger = "schedule" | "manual" | "startup";
+
+interface SyncFailure {
+  kind: "coach" | "venue";
+  sourceId: string;
+  code: string;
+  message: string;
+}
+
+interface RunOutcome {
+  status: RagicRunStatus;
+  total: number;
+  failures: SyncFailure[];
+  errorCode?: string | null;
+}
+
+interface RagicRunStore {
+  start(trigger: SyncTrigger): Promise<string | null>;
+  finish(runId: string | null, outcome: RunOutcome): Promise<void>;
+}
+
+/** Persists each run and its failed items; bookkeeping errors never stop a sync. */
+const dbRunStore: RagicRunStore = {
+  async start(trigger) {
+    try {
+      const [run] = await db.insert(ragicSyncRuns).values({ trigger, status: "running" }).returning({ id: ragicSyncRuns.id });
+      return run.id;
+    } catch (error) {
+      console.error("[Ragic] could not record sync start:", (error as { code?: string })?.code ?? "error");
+      return null;
+    }
+  },
+  async finish(runId, outcome) {
+    if (!runId) return;
+    try {
+      await db
+        .update(ragicSyncRuns)
+        .set({
+          status: outcome.status,
+          finishedAt: new Date(),
+          totalCount: outcome.total,
+          successCount: Math.max(outcome.total - outcome.failures.length, 0),
+          failureCount: outcome.failures.length,
+          errorCode: outcome.errorCode ?? null,
+        })
+        .where(eq(ragicSyncRuns.id, runId));
+      if (outcome.failures.length > 0) {
+        await db.insert(ragicSyncItems).values(
+          outcome.failures.map((failure) => ({
+            runId,
+            kind: failure.kind,
+            sourceId: failure.sourceId,
+            status: "failed",
+            errorCode: failure.code,
+            errorMessage: failure.message,
+          })),
+        );
+      }
+    } catch (error) {
+      console.error("[Ragic] could not record sync result:", (error as { code?: string })?.code ?? "error");
+    }
+  },
+};
+
+type SyncLock = { release: () => Promise<void> };
+const NO_LOCK: SyncLock = { release: async () => {} };
+// Shared by every instance, so only one of them syncs at a time.
+const RAGIC_SYNC_LOCK_KEY = 7_310_021;
+
+/** null = another instance is syncing. Lock trouble falls back to syncing unlocked. */
+const dbSyncLock = async (): Promise<SyncLock | null> => {
+  let client: PoolClient;
+  try {
+    client = await pool.connect();
+  } catch {
+    return NO_LOCK;
+  }
+  try {
+    const { rows } = await client.query("SELECT pg_try_advisory_lock($1) AS ok", [RAGIC_SYNC_LOCK_KEY]);
+    if (!rows[0]?.ok) {
+      client.release();
+      return null;
+    }
+    return {
+      release: async () => {
+        try {
+          await client.query("SELECT pg_advisory_unlock($1)", [RAGIC_SYNC_LOCK_KEY]);
+        } finally {
+          client.release();
+        }
+      },
+    };
+  } catch {
+    client.release();
+    return NO_LOCK;
+  }
+};
+
+let runStore: RagicRunStore = dbRunStore;
+let acquireSyncLock: () => Promise<SyncLock | null> = dbSyncLock;
+
+export function setRagicRunStoreForTest(store: RagicRunStore): void {
+  runStore = store;
+}
+
+export function setRagicSyncLockForTest(lock: () => Promise<SyncLock | null>): void {
+  acquireSyncLock = lock;
+}
+
+/** Stored and shown instead of the raw error, which can carry Ragic URLs or names. */
+function ragicErrorCode(error: unknown): string {
+  const message = errMessage(error);
+  if (message.includes("RAGIC_API_KEY is not configured")) return "RAGIC_NOT_CONFIGURED";
+  if (message.startsWith("Ragic API failed")) return "RAGIC_FETCH_FAILED";
+  return "RAGIC_SYNC_EXCEPTION";
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -171,24 +296,32 @@ async function fetchPersonalInfo(): Promise<Map<string, PersonalInfo>> {
   return infoMap;
 }
 
-async function syncCoaches(): Promise<SyncResult["coaches"]> {
+async function syncCoaches(failures: SyncFailure[]): Promise<SyncResult["coaches"] & { considered: number }> {
   // Sequential on purpose: Ragic answers bursts with empty 200 bodies.
   const allRecords = await fetchRagicRecords(RAGIC_COACH_API_URL);
   const personalInfo = await fetchPersonalInfo();
 
-  const seen = new Set<string>();
-  const activeCoaches: { name: string; phone: string | null; email: string | null }[] = [];
-  for (const r of allRecords) {
+  const candidates = allRecords.filter((r) => {
     const name = field(r, "姓名");
-    if (!name || EXCLUDED_NAMES.has(name) || !isCoachRole(r)) continue;
-    if (seen.has(name)) {
-      console.warn(`[Ragic] duplicate coach row in Ragic for "${name}" — using the first`);
-      continue;
-    }
-    seen.add(name);
-    activeCoaches.push({ name, phone: field(r, "手機") || null, email: field(r, "E-mail") || null });
+    return !!name && !EXCLUDED_NAMES.has(name) && isCoachRole(r);
+  });
+  // Two people with one name cannot be told apart: sync neither, report both.
+  const { unique, duplicates } = splitDuplicateNames(candidates, (r) => field(r, "姓名"));
+  for (const r of duplicates) {
+    failures.push({
+      kind: "coach",
+      sourceId: String(r._ragicId),
+      code: "DUPLICATE_NAME_IN_RAGIC",
+      message: `Ragic 有多筆同名「${field(r, "姓名")}」，無法確定是哪一位，未同步`,
+    });
   }
-  if (allRecords.length > 0 && activeCoaches.length === 0) {
+  const activeCoaches = unique.map((r) => ({
+    name: field(r, "姓名"),
+    ragicId: String(r._ragicId),
+    phone: field(r, "手機") || null,
+    email: field(r, "E-mail") || null,
+  }));
+  if (allRecords.length > 0 && candidates.length === 0) {
     console.warn(
       `[Ragic] ${allRecords.length} coach rows fetched but none had 姓名 + 教練 職務 — have the sheet's field names changed?`,
     );
@@ -202,6 +335,9 @@ async function syncCoaches(): Promise<SyncResult["coaches"]> {
   let lineIdsSynced = 0;
   let employeeIdsSynced = 0;
 
+  const fail = (coach: { name: string; ragicId: string }, code: string, message: string) =>
+    failures.push({ kind: "coach", sourceId: coach.ragicId, code, message: `「${coach.name}」${message}` });
+
   for (const coach of activeCoaches) {
     const info = personalInfo.get(coach.name);
     const lineId = info?.lineId ?? null;
@@ -214,6 +350,7 @@ async function syncCoaches(): Promise<SyncResult["coaches"]> {
       const owner = lineId ? byLineId.get(lineId) : undefined;
       if (owner) {
         console.warn(`[Ragic] "${coach.name}": LINE ID already bound to "${owner.name}" — creating without it`);
+        fail(coach, "LINE_ID_TAKEN", "的 LINE ID 已綁在其他帳號，建立帳號時未綁定");
       }
       try {
         const created = await storage.createCoachUser({
@@ -237,8 +374,10 @@ async function syncCoaches(): Promise<SyncResult["coaches"]> {
       } catch (err) {
         if (isUniqueViolation(err)) {
           console.warn(`[Ragic] skipped creating "${coach.name}": unique conflict (registered concurrently?)`);
+          fail(coach, "CREATE_CONFLICT", "建立帳號時與既有資料衝突，未建立");
         } else {
           console.error(`[Ragic] failed to create "${coach.name}":`, errMessage(err));
+          fail(coach, "CREATE_FAILED", "建立帳號失敗");
         }
       }
       continue;
@@ -248,6 +387,7 @@ async function syncCoaches(): Promise<SyncResult["coaches"]> {
       const owner = byLineId.get(lineId);
       if (owner && owner.id !== current.id) {
         console.warn(`[Ragic] "${coach.name}": LINE ID already bound to "${owner.name}" — not re-binding`);
+        fail(coach, "LINE_ID_TAKEN", "的 LINE ID 已綁在其他帳號，未綁定");
       } else {
         try {
           const updatedUser = await storage.updateCoachUserLineId(current.id, lineId);
@@ -260,8 +400,10 @@ async function syncCoaches(): Promise<SyncResult["coaches"]> {
         } catch (err) {
           if (isUniqueViolation(err)) {
             console.warn(`[Ragic] skipped LINE ID for "${coach.name}": taken by another account`);
+            fail(coach, "LINE_ID_TAKEN", "的 LINE ID 已綁在其他帳號，未綁定");
           } else {
             console.error(`[Ragic] failed to sync LINE ID for "${coach.name}":`, errMessage(err));
+            fail(coach, "LINE_ID_UPDATE_FAILED", "的 LINE ID 寫入失敗");
           }
         }
       }
@@ -274,6 +416,7 @@ async function syncCoaches(): Promise<SyncResult["coaches"]> {
         console.log(`[Ragic] synced employee ID for "${coach.name}": ${employeeId}`);
       } catch (err) {
         console.error(`[Ragic] failed to sync employee ID for "${coach.name}":`, errMessage(err));
+        fail(coach, "EMPLOYEE_ID_UPDATE_FAILED", "的員工編號寫入失敗");
       }
     }
   }
@@ -282,36 +425,63 @@ async function syncCoaches(): Promise<SyncResult["coaches"]> {
   if (lineIdsSynced > 0) console.log(`[Ragic] synced ${lineIdsSynced} LINE IDs`);
   if (employeeIdsSynced > 0) console.log(`[Ragic] synced ${employeeIdsSynced} employee IDs`);
 
-  return { added, total: activeCoaches.length, lineIdsSynced, employeeIdsSynced };
+  return { added, total: activeCoaches.length, lineIdsSynced, employeeIdsSynced, considered: candidates.length };
 }
 
-export async function syncRagicAll(): Promise<SyncResult | null> {
+export async function syncRagicAll(trigger: SyncTrigger = "manual"): Promise<SyncResult | null> {
   if (isSyncing) {
     return lastSyncResult;
   }
 
   isSyncing = true;
+  const lock = await acquireSyncLock();
+  if (!lock) {
+    isSyncing = false;
+    console.log("[Ragic] another instance is syncing — skipped");
+    recordAppLog({ level: "info", source: "ragic", code: "RAGIC_SYNC_SKIPPED_BUSY", message: "另一台正在同步，本次跳過", detail: { trigger } });
+    return lastSyncResult;
+  }
 
+  const runId = await runStore.start(trigger);
+  const failures: SyncFailure[] = [];
+  let considered = 0;
   try {
     const venues = await syncVenues();
-    const coaches = await syncCoaches();
+    const coachResult = await syncCoaches(failures);
+    const { considered: coachRows, ...coaches } = coachResult;
+    considered = coachRows;
     const result: SyncResult = { venues, coaches };
+    const status = runStatusFor(failures.length, false);
 
     lastSyncTime = new Date().toISOString();
     lastSyncResult = result;
-    lastError = null;
+    // A partial run must not look like a clean success on the IT page.
+    lastError = failures.length > 0 ? { at: lastSyncTime, message: `${failures.length} 筆同步失敗` } : null;
+    await runStore.finish(runId, { status, total: considered, failures });
+    recordAppLog({
+      level: failures.length > 0 ? "error" : "info",
+      source: "ragic",
+      code: failures.length > 0 ? "RAGIC_SYNC_PARTIAL" : "RAGIC_SYNC_OK",
+      message: failures.length > 0 ? `Ragic 同步部分失敗：${failures.length} 筆` : "Ragic 同步完成",
+      detail: { trigger, runId, total: considered, failed: failures.length },
+    });
 
     console.log(
-      `[Ragic] sync completed: ${venues.total} departments (${venues.added.length} new), ` +
-        `${coaches.total} active coaches (${coaches.added} new, ${coaches.lineIdsSynced} LINE IDs synced)`,
+      `[Ragic] sync ${status}: ${venues.total} departments (${venues.added.length} new), ` +
+        `${coaches.total} active coaches (${coaches.added} new, ${coaches.lineIdsSynced} LINE IDs synced), ` +
+        `${failures.length} failed`,
     );
     return result;
   } catch (error) {
+    const errorCode = ragicErrorCode(error);
     lastError = { at: new Date().toISOString(), message: errMessage(error) };
     console.error("[Ragic] sync failed:", lastError.message);
+    await runStore.finish(runId, { status: runStatusFor(failures.length, true), total: considered, failures, errorCode });
+    recordAppLog({ level: "error", source: "ragic", code: errorCode, message: "Ragic 同步失敗", detail: { trigger, runId } });
     throw error;
   } finally {
     isSyncing = false;
+    await lock.release().catch(() => {});
   }
 }
 
@@ -321,7 +491,7 @@ function scheduleBootRetry(attempt: number) {
   console.warn(`[Ragic] boot sync failed — retry #${attempt + 1} in ${delay / 60_000} min`);
   setTimeout(() => {
     console.log(`[Ragic] boot retry #${attempt + 1} starting…`);
-    syncRagicAll().catch((err) => {
+    syncRagicAll("startup").catch((err) => {
       console.error(`[Ragic] boot retry #${attempt + 1} failed:`, errMessage(err));
       scheduleBootRetry(attempt + 1);
     });
@@ -331,7 +501,7 @@ function scheduleBootRetry(attempt: number) {
 export function setupRagicSyncCron() {
   setTimeout(() => {
     console.log("[Ragic] boot sync starting");
-    syncRagicAll().catch((err) => {
+    syncRagicAll("startup").catch((err) => {
       console.error("[Ragic] boot sync failed:", errMessage(err));
       scheduleBootRetry(0);
     });
@@ -343,7 +513,7 @@ export function setupRagicSyncCron() {
     "0 3 * * *",
     () => {
       console.log("[Ragic] daily sync triggered (03:00 Asia/Taipei)");
-      syncRagicAll().catch((err) => {
+      syncRagicAll("schedule").catch((err) => {
         console.error("[Ragic] scheduled sync failed:", errMessage(err));
       });
     },

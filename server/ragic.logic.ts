@@ -166,3 +166,39 @@ export function normalizeLineId(raw: string): string | null {
   const v = raw.trim();
   return /^U[0-9a-f]{32}$/i.test(v) ? v : null;
 }
+
+// ─── Sync runs (#1) ────────────────────────────────────────────────────
+
+/**
+ * Splits rows into names that occur once and names that occur more than
+ * once. Two different people sharing a name in Ragic cannot be told apart
+ * by name, so none of those rows are synced (or merged into one account);
+ * each is reported as a failed item instead.
+ */
+export function splitDuplicateNames<T>(rows: readonly T[], nameOf: (row: T) => string): { unique: T[]; duplicates: T[] } {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const key = nameOf(row).trim();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const unique: T[] = [];
+  const duplicates: T[] = [];
+  for (const row of rows) (counts.get(nameOf(row).trim())! > 1 ? duplicates : unique).push(row);
+  return { unique, duplicates };
+}
+
+export type RagicRunStatus = "success" | "partial_failed" | "failed";
+
+/** Any failed item makes a run partial; a run that aborted is failed. */
+export function runStatusFor(failedItems: number, aborted: boolean): RagicRunStatus {
+  if (aborted) return "failed";
+  return failedItems > 0 ? "partial_failed" : "success";
+}
+
+/** A run still "running" after this long was cut off (instance stopped mid-sync). */
+export const STALE_RUN_MS = 30 * 60_000;
+
+export function displayRunStatus(run: { status: string; startedAt: Date }, now = new Date()): string {
+  if (run.status === "running" && now.getTime() - run.startedAt.getTime() > STALE_RUN_MS) return "interrupted";
+  return run.status;
+}
