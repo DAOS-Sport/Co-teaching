@@ -1,3 +1,4 @@
+import { isPlaceholderCoach } from "@shared/scheduleRules";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
@@ -129,7 +130,7 @@ export default function ScheduleGrid({ date }: ScheduleGridProps) {
                 return (
                   <td
                     key={cellKey}
-                    className="schedule-cell p-2 border border-border hover:bg-accent/50 cursor-pointer relative"
+                    className={`schedule-cell p-2 border cursor-pointer relative ${schedules?.some(s => s.venueId === venue.id && s.timeSlotId === timeSlot.id && (isPlaceholderCoach(s.coachName) || isPlaceholderCoach(s.coachName2))) ? "bg-red-200 border-red-600 text-red-950 hover:bg-red-300" : "border-border hover:bg-accent/50"}`}
                     data-testid={`cell-${venue.name}-${timeSlot.period}`}
                   >
                     <input

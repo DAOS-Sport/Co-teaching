@@ -1,8 +1,16 @@
+/** Confirmed unstaffed slot; this code is never a person. */
+export const UNSTAFFED_COACH = "000";
+export const isPlaceholderCoach = (value: unknown): boolean =>
+  typeof value === "string" && value.trim() === UNSTAFFED_COACH;
+
+export const isRealCoachName = (value: unknown): value is string =>
+  typeof value === "string" && value.trim() !== "" && !isPlaceholderCoach(value);
+
 export const normalizeScheduleName = (value: string): string =>
   value.trim().replace(/\s+/g, "").toLocaleLowerCase();
 
 export const sameCoach = (first: unknown, second: unknown): boolean => {
-  if (typeof first !== "string" || typeof second !== "string") return false;
+  if (!isRealCoachName(first) || !isRealCoachName(second)) return false;
   const a = normalizeScheduleName(first);
   const b = normalizeScheduleName(second);
   return !!a && !!b && a === b;

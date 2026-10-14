@@ -1,3 +1,4 @@
+import { isRealCoachName } from "@shared/scheduleRules";
 import cron from 'node-cron';
 import { storage } from './storage';
 import { format, addDays, startOfWeek, parseISO } from 'date-fns';
@@ -138,6 +139,7 @@ async function sendWeeklyScheduleNotifications(): Promise<void> {
     for (const coach of coachesWithLine) {
       try {
       const coachName = (coach.linkedCoachName || coach.name)!;
+      if (!isRealCoachName(coachName)) continue;
       const lineId = coach.lineId!;
 
       // 去重：同一週若已推播過，跳過（防止 cron + 手動觸發重複送出）
@@ -280,8 +282,8 @@ async function sendDailyTomorrowNotifications(): Promise<void> {
     // ── 5. 收集明天有課的教練名單（去重）
     const scheduledCoachNames = new Set<string>();
     for (const s of tomorrowSchedules) {
-      if (s.coachName) scheduledCoachNames.add(s.coachName);
-      if (s.coachName2) scheduledCoachNames.add(s.coachName2);
+      if (isRealCoachName(s.coachName)) scheduledCoachNames.add(s.coachName);
+      if (isRealCoachName(s.coachName2)) scheduledCoachNames.add(s.coachName2);
     }
 
     const noLineIdCoaches: string[] = [];
@@ -390,7 +392,7 @@ export async function notifyScheduleUnlocked(venueId: string, startDate: string,
     const notified = new Set<string>();
 
     for (const row of rows) {
-      for (const name of [row.coachName, row.coachName2].filter(Boolean) as string[]) {
+      for (const name of [row.coachName, row.coachName2].filter(isRealCoachName)) {
         if (notified.has(name)) continue;
         notified.add(name);
         const byLinked = await db.select().from(coachUsers).where(eq(coachUsers.linkedCoachName, name)).limit(1);
@@ -416,6 +418,7 @@ export async function sendFillReminderToCoaches(): Promise<{ sent: number }> {
   let sent = 0;
   for (const coach of withLine) {
     const coachName = coach.linkedCoachName || coach.name;
+    if (!isRealCoachName(coachName)) continue;
     const avail = await db.select().from(coachAvailability).where(eq(coachAvailability.coachName, coachName)).limit(1);
     const prefs = await db.select().from(coachVenuePreferences).where(eq(coachVenuePreferences.coachName, coachName)).limit(1);
     const hasAvail = avail.length > 0;

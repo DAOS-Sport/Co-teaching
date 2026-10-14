@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/command";
 import { Check, ChevronsUpDown } from "lucide-react";
 import type { Schedule, Venue, TimeSlot } from "@shared/schema";
+import { UNSTAFFED_COACH, isPlaceholderCoach } from "@shared/scheduleRules";
 import { getExtendedWeekDays, getExtendedWeekdayNames, getExtendedWeekEnd } from "@/utils/special-workdays";
 import AdminLayout from "@/components/admin-layout";
 
@@ -47,7 +48,10 @@ export default function CoachView() {
   });
 
   const derivedCoaches = useMemo(() => {
-    return coaches ? [...coaches].sort() : [];
+    // The shared coach roster excludes placeholders; schedule lookup must
+    // still offer confirmed unstaffed slots, including coachName2-only rows.
+    if (!coaches) return [];
+    return [...coaches.filter(coach => coach !== UNSTAFFED_COACH).sort(), UNSTAFFED_COACH];
   }, [coaches]);
 
   useEffect(() => {
@@ -129,7 +133,7 @@ export default function CoachView() {
                     data-testid={`option-${coach}`}
                   >
                     <Check className={`h-4 w-4 ${selectedCoach === coach ? "opacity-100" : "opacity-0"}`} />
-                    {coach}
+                    {coach === UNSTAFFED_COACH ? `${coach}（確認無人）` : coach}
                   </CommandItem>
                 ))}
               </CommandGroup>
@@ -188,7 +192,7 @@ export default function CoachView() {
                       daySchedules.map((schedule) => (
                         <Card
                           key={schedule.id}
-                          className={`${getVenueColorClass(schedule.venue.color)} text-white cursor-pointer hover:opacity-90 transition-opacity`}
+                          className={`${isPlaceholderCoach(schedule.coachName) || isPlaceholderCoach(schedule.coachName2) ? "bg-red-700 border-red-800" : getVenueColorClass(schedule.venue.color)} text-white cursor-pointer hover:opacity-90 transition-opacity`}
                           data-testid={`class-card-${schedule.id}`}
                         >
                           <CardContent className="p-3 text-xs">

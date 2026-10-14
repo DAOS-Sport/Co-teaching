@@ -1,3 +1,4 @@
+import { isRealCoachName, isPlaceholderCoach } from "@shared/scheduleRules";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -363,6 +364,7 @@ function CoachAssignmentContent() {
   ): Map<string, ConflictDetail[]> => {
     const conflicting = new Map<string, ConflictDetail[]>();
     const push = (name: string, detail: ConflictDetail) => {
+      if (!isRealCoachName(name)) return;
       const arr = conflicting.get(name);
       if (arr) arr.push(detail);
       else conflicting.set(name, [detail]);
@@ -382,14 +384,14 @@ function CoachAssignmentContent() {
   const getCoach1Conflicts = (schedule: Schedule & { venue: Venue; timeSlot: TimeSlot }) => {
     const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id);
     const hardDisabled = new Set<string>();
-    if (schedule.coachName2) hardDisabled.add(schedule.coachName2);
+    if (isRealCoachName(schedule.coachName2)) hardDisabled.add(schedule.coachName2);
     return { softConflicts, hardDisabled };
   };
 
   const getCoach2Conflicts = (schedule: Schedule & { venue: Venue; timeSlot: TimeSlot }) => {
     const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id);
     const hardDisabled = new Set<string>();
-    if (schedule.coachName) hardDisabled.add(schedule.coachName);
+    if (isRealCoachName(schedule.coachName)) hardDisabled.add(schedule.coachName);
     return { softConflicts, hardDisabled };
   };
 
@@ -397,8 +399,8 @@ function CoachAssignmentContent() {
     const assigned = new Set<string>();
     allSchedules.forEach((s) => {
       if (s.date !== date || s.timeSlotId !== timeSlotId) return;
-      if (s.coachName) assigned.add(s.coachName);
-      if (s.coachName2) assigned.add(s.coachName2);
+      if (isRealCoachName(s.coachName)) assigned.add(s.coachName);
+      if (isRealCoachName(s.coachName2)) assigned.add(s.coachName2);
     });
     return assigned;
   };
@@ -465,8 +467,8 @@ function CoachAssignmentContent() {
       if (stats[a.coachName]) stats[a.coachName].available++;
     }
     for (const s of allSchedules) {
-      if (s.coachName && stats[s.coachName]) stats[s.coachName].assigned++;
-      if (s.coachName2 && stats[s.coachName2]) stats[s.coachName2].assigned++;
+      if (isRealCoachName(s.coachName) && stats[s.coachName]) stats[s.coachName].assigned++;
+      if (isRealCoachName(s.coachName2) && stats[s.coachName2]) stats[s.coachName2].assigned++;
     }
     return stats;
   }, [coaches, availability, allSchedules]);
@@ -824,7 +826,10 @@ function CoachAssignmentContent() {
                               );
                               const isMissing = !hasCoach || (needsTwo && !hasCoach2);
                               const isCardSelected = selectedScheduleId === schedule.id;
-                              const missingBg = isMissing
+                              const isUnstaffed = isPlaceholderCoach(schedule.coachName) || isPlaceholderCoach(schedule.coachName2);
+                              const missingBg = isUnstaffed
+                                ? "bg-red-200 border-2 border-red-600 text-red-950"
+                                : isMissing
                                 ? !hasCoach
                                   ? "bg-red-50 border border-red-200"
                                   : "bg-amber-50 border border-amber-200"
@@ -842,7 +847,7 @@ function CoachAssignmentContent() {
                                     isCardSelected ? "ring-2 ring-blue-500 shadow-md" : "hover:shadow-sm"
                                   }`}
                                 >
-                                  <div className="bg-gray-700 text-white text-xs px-1.5 py-0.5 rounded text-center break-words whitespace-normal leading-4">
+                                  <div className={`${isUnstaffed ? "bg-red-700" : "bg-gray-700"} text-white text-xs px-1.5 py-0.5 rounded text-center break-words whitespace-normal leading-4`}>
                                     <span className="font-bold">{schedule.className}</span>
                                     <span className="font-normal opacity-90">｜需{schedule.coachCount || 1}位</span>
                                   </div>
@@ -874,7 +879,9 @@ function CoachAssignmentContent() {
                                       placeholder="教練1"
                                       hasValue={hasCoach}
                                       triggerClassName={
-                                        hasCoach ? "border-green-400 bg-green-50" : "border-red-400 bg-red-50"
+                                        isPlaceholderCoach(schedule.coachName)
+                                          ? "border-red-600 bg-red-100 text-red-950"
+                                          : hasCoach ? "border-green-400 bg-green-50" : "border-red-400 bg-red-50"
                                       }
                                     />
                                     {hasCoach && (
@@ -921,7 +928,9 @@ function CoachAssignmentContent() {
                                         placeholder="教練2"
                                         hasValue={hasCoach2}
                                         triggerClassName={
-                                          hasCoach2
+                                          isPlaceholderCoach(schedule.coachName2)
+                                            ? "border-red-600 bg-red-100 text-red-950"
+                                            : hasCoach2
                                             ? "border-blue-400 bg-blue-50"
                                             : "border-amber-400 bg-amber-50"
                                         }

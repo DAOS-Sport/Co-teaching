@@ -1,3 +1,4 @@
+import { isRealCoachName } from "@shared/scheduleRules";
 import type { Express } from "express";
 import { format } from "date-fns";
 import { storage } from "../storage";
@@ -103,6 +104,7 @@ export function registerNotifyRoutes(app: Express): void {
         const results: { coachName: string; success: boolean }[] = [];
 
         for (const coachName of coachNames) {
+          if (!isRealCoachName(coachName)) continue;
           const coach = coachMap.get(coachName);
           if (!coach?.lineId) {
             results.push({ coachName, success: false });

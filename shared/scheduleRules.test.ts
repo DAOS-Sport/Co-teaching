@@ -33,3 +33,9 @@ test("promoteCoachSlots: consistent slots are left alone", () => {
   assert.equal(promoteCoachSlots({ coachName: null, coachName2: null, coach1IsTeaching: false, coach2IsTeaching: false }), null);
   assert.equal(promoteCoachSlots({ coachName: null, coachName2: " ", coach1IsTeaching: false, coach2IsTeaching: false }), null);
 });
+
+test("000 is not a duplicate coach and still occupies a confirmed slot", () => {
+  assert.equal(sameCoach("000", "000"), false);
+  assert.equal(sameCoach("000", "熊韋程"), false);
+  assert.equal(promoteCoachSlots({ coachName: "000", coachName2: "熊韋程", coach1IsTeaching: false, coach2IsTeaching: true }), null);
+});

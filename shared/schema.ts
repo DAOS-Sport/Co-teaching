@@ -42,6 +42,46 @@ export const users = pgTable("users", {
   updatedAt: timestamp("updated_at").defaultNow(),
 });
 
+// OAuth state for the scheduling MCP. Client registrations are persisted so
+// Grok does not have to register again after a deployment restart. Access and
+// refresh token values are never stored directly; only their SHA-256 digests
+// are kept in mcpOauthTokens.
+export const mcpOauthClients = pgTable("mcp_oauth_clients", {
+  clientId: varchar("client_id").primaryKey(),
+  clientData: jsonb("client_data").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+export const mcpOauthCodes = pgTable("mcp_oauth_codes", {
+  codeHash: varchar("code_hash", { length: 64 }).primaryKey(),
+  clientId: varchar("client_id").notNull(),
+  redirectUri: text("redirect_uri").notNull(),
+  codeChallenge: varchar("code_challenge").notNull(),
+  scopes: jsonb("scopes").notNull(),
+  resource: text("resource").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  consumedAt: timestamp("consumed_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (table) => [
+  index("idx_mcp_oauth_codes_client").on(table.clientId),
+  index("idx_mcp_oauth_codes_expiry").on(table.expiresAt),
+]);
+
+export const mcpOauthTokens = pgTable("mcp_oauth_tokens", {
+  tokenHash: varchar("token_hash", { length: 64 }).primaryKey(),
+  tokenType: varchar("token_type", { length: 16 }).notNull(),
+  clientId: varchar("client_id").notNull(),
+  scopes: jsonb("scopes").notNull(),
+  resource: text("resource").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  revokedAt: timestamp("revoked_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (table) => [
+  index("idx_mcp_oauth_tokens_client").on(table.clientId),
+  index("idx_mcp_oauth_tokens_expiry").on(table.expiresAt),
+]);
+
 export const venues = pgTable("venues", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   name: varchar("name").notNull(),

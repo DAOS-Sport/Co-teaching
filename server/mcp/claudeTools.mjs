@@ -15,7 +15,7 @@ export const tools = [
     name: "workspace_info",
     title: "Workspace info",
     description:
-      "Show the workspace root, current Git branch/status, package scripts, and environment variable names. Values are never returned.",
+      "Show workspace, read-only Git status, scripts, environment variable names, and explicit non-secret Replit project identity. Credential values are never returned.",
     inputSchema: objectSchema({}),
     annotations: readOnlyAnnotations(),
   },
@@ -175,6 +175,7 @@ export async function callTool(name, args = {}) {
         gitBranch: branch.stdout.trim(),
         gitStatus: status.stdout.trim().split("\n").filter(Boolean),
         packageScripts: scripts,
+        projectIdentity: readPlatformProjectIdentity(),
         environmentVariableNames: Object.keys(process.env).sort(),
         note: "Environment values are intentionally withheld.",
       };
@@ -242,6 +243,14 @@ export async function callTool(name, args = {}) {
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
+}
+
+function readPlatformProjectIdentity() {
+  const id = process.env.REPL_ID;
+  const owner = process.env.REPL_OWNER;
+  const slug = process.env.REPL_SLUG;
+  if (!id || !/^[0-9a-f-]{36}$/i.test(id) || !owner || !/^[A-Za-z0-9_-]{1,100}$/.test(owner) || !slug || !/^[A-Za-z0-9_-]{1,200}$/.test(slug)) return null;
+  return { id, owner, slug };
 }
 
 export function textResult(value, isError = false) {

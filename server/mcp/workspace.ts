@@ -354,7 +354,7 @@ export async function gitWorkspaceCommand(
   args: string[],
   timeoutMs = 30_000,
 ): Promise<CommandResult> {
-  return runProcess("git", args, WORKSPACE_ROOT, undefined, timeoutMs);
+  return runProcess("git", ["--no-optional-locks", ...args], WORKSPACE_ROOT, undefined, timeoutMs);
 }
 
 async function runProcess(

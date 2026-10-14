@@ -1,3 +1,5 @@
+import { isRealCoachName } from "./scheduleRules";
+
 export const SCHEDULE_IMPORT_MAX_ROWS = 500;
 
 export type ScheduleImportMode = "insert_only" | "update_matching";
@@ -117,7 +119,7 @@ export function parseScheduleImportText(text: string): ScheduleImportParseResult
       rowErrors.push("教練人數只能是 1 或 2");
     if (coachName2 && parsedCoachCount !== 2)
       rowErrors.push("填寫教練2時，教練人數必須是 2");
-    if (coachName && coachName2 && coachName === coachName2)
+    if (isRealCoachName(coachName) && coachName === coachName2)
       rowErrors.push("教練1與教練2不可相同");
 
     if (rowErrors.length > 0 || !period || (parsedCoachCount !== 1 && parsedCoachCount !== 2)) {

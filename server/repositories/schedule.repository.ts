@@ -5,6 +5,7 @@
  * and derived statistics/conflict queries. The IStorage façade in
  * `server/storage.ts` delegates its schedule-shaped methods here.
  */
+import { isRealCoachName } from "@shared/scheduleRules";
 import { and, between, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { db } from "../db";
 import { addDays, format } from "date-fns";
@@ -47,12 +48,17 @@ const scheduleSelect = {
 };
 
 export type ScheduleUpdateFields = Partial<{
+  date: string;
+  venueId: string;
+  timeSlotId: string;
   className: string;
-  coachName: string;
+  coachName: string | null;
   coachName2: string | null;
   coachCount: number;
   coach1IsTeaching: boolean;
   coach2IsTeaching: boolean;
+  isClassLocked: boolean;
+  notes: string | null;
 }>;
 
 export class ScheduleRepository {
@@ -188,6 +194,9 @@ export class ScheduleRepository {
     updateData: ScheduleUpdateFields
   ): Promise<Schedule> {
     const setData: Record<string, unknown> = { updatedAt: new Date() };
+    if (updateData.date !== undefined) setData.date = updateData.date;
+    if (updateData.venueId !== undefined) setData.venueId = updateData.venueId;
+    if (updateData.timeSlotId !== undefined) setData.timeSlotId = updateData.timeSlotId;
     if (updateData.className !== undefined) setData.className = updateData.className;
     if (updateData.coachName !== undefined) setData.coachName = updateData.coachName;
     if (updateData.coachName2 !== undefined) setData.coachName2 = updateData.coachName2;
@@ -196,6 +205,9 @@ export class ScheduleRepository {
       setData.coach1IsTeaching = updateData.coach1IsTeaching;
     if (updateData.coach2IsTeaching !== undefined)
       setData.coach2IsTeaching = updateData.coach2IsTeaching;
+    if (updateData.isClassLocked !== undefined)
+      setData.isClassLocked = updateData.isClassLocked;
+    if (updateData.notes !== undefined) setData.notes = updateData.notes;
     const [result] = await db
       .update(schedules)
       .set(setData)
@@ -249,7 +261,7 @@ export class ScheduleRepository {
           const parts = schedule.coachName.split("-");
           for (let i = 1; i < parts.length; i++) {
             const coach = parts[i].trim();
-            if (coach && coach !== "缺") coaches.push(coach);
+            if (isRealCoachName(coach) && coach !== "缺") coaches.push(coach);
           }
         } else {
           coaches.push(schedule.coachName.trim());
@@ -258,7 +270,7 @@ export class ScheduleRepository {
       if (schedule.coachName2) coaches.push(schedule.coachName2.trim());
       if (coaches.length === 0) return;
 
-      coaches.forEach((coachName) => {
+      coaches.filter(isRealCoachName).forEach((coachName) => {
         if (!coachTimeSlotMap.has(coachName)) {
           coachTimeSlotMap.set(coachName, new Map());
         }
@@ -329,7 +341,7 @@ export class ScheduleRepository {
       venueColor: string,
       isTeaching: boolean
     ) => {
-      if (!name || name.trim() === "") return;
+      if (!isRealCoachName(name)) return;
       const trimmed = name.trim();
       if (!coachStats.has(trimmed)) {
         coachStats.set(trimmed, {
@@ -390,11 +402,11 @@ export class ScheduleRepository {
         const parts = splitByAnySeparator(result.coachName);
         for (let i = 1; i < parts.length; i++) {
           const coach = parts[i].trim();
-          if (coach && coach !== "缺") uniqueCoaches.add(coach);
+          if (isRealCoachName(coach) && coach !== "缺") uniqueCoaches.add(coach);
         }
       } else {
         const coach = result.coachName.trim();
-        if (coach && coach !== "缺") uniqueCoaches.add(coach);
+        if (isRealCoachName(coach) && coach !== "缺") uniqueCoaches.add(coach);
       }
     });
     return Array.from(uniqueCoaches).sort();

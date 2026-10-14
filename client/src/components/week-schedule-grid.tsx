@@ -1,3 +1,4 @@
+import { isPlaceholderCoach } from "@shared/scheduleRules";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useRef, useImperativeHandle, forwardRef } from "react";
 import { useToast } from "@/hooks/use-toast";
@@ -416,7 +417,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
                         return (
                           <td
                             key={cellKey}
-                            className="schedule-cell p-2 border border-border hover:bg-accent/50 cursor-pointer relative align-top"
+                            className={`schedule-cell p-2 border cursor-pointer relative align-top ${cellSchedules.some(s => isPlaceholderCoach(s.coachName) || isPlaceholderCoach(s.coachName2)) ? "bg-red-200 border-red-600 text-red-950 hover:bg-red-300" : "border-border hover:bg-accent/50"}`}
                             data-testid={`cell-${dayIndex}-${venue.name}-${timeSlot.period}`}
                             style={{ minHeight: '60px', verticalAlign: 'top' }}
                           >
@@ -432,7 +433,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
                                 return (
                                   <div 
                                     key={schedule.id} 
-                                    className={`flex items-center justify-between bg-background/50 rounded px-1 py-0.5 text-xs group relative ${isScheduleSaving ? 'opacity-60' : ''}`}
+                                    className={`flex items-center justify-between ${isPlaceholderCoach(schedule.coachName) || isPlaceholderCoach(schedule.coachName2) ? "bg-red-700 text-white" : "bg-background/50"} rounded px-1 py-0.5 text-xs group relative ${isScheduleSaving ? 'opacity-60' : ''}`}
                                     data-testid={`schedule-item-${dayIndex}-${venue.name}-${timeSlot.period}-${index}`}
                                   >
                                     {isScheduleSaving && (

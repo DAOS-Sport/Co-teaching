@@ -1,3 +1,4 @@
+import { isRealCoachName } from "@shared/scheduleRules";
 import { between, eq, sql } from "drizzle-orm";
 import { db } from "../db";
 import { coachUsers, schedules, timeSlots, venues } from "@shared/schema";
@@ -109,7 +110,7 @@ async function buildPreview(
       issues.push({ severity: "error", code: "locked", message: "該日期的場館課表已鎖定" });
     }
 
-    for (const coach of [row.coachName, row.coachName2].filter(Boolean) as string[]) {
+    for (const coach of [row.coachName, row.coachName2].filter(isRealCoachName)) {
       if (!knownCoaches.has(coach)) {
         issues.push({ severity: "warning", code: "unknown_coach", message: `教練「${coach}」不在已核准名單` });
       }

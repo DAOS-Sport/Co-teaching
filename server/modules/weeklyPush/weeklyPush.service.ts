@@ -12,6 +12,7 @@
  * The service is queue-aware but DB access goes through the
  * repository; the routes never touch either layer directly.
  */
+import { isRealCoachName } from "@shared/scheduleRules";
 import { addDays, format, startOfWeek } from "date-fns";
 import { randomUUID } from "node:crypto";
 import { zhTW } from "date-fns/locale";
@@ -141,6 +142,7 @@ export async function buildRecipientsForWeek(
   const out: BuiltRecipient[] = [];
   for (const coach of coachesWithLine) {
     const coachName = (coach.linkedCoachName || coach.name)!;
+    if (!isRealCoachName(coachName)) continue;
     const mine = weekSchedules.filter(
       (s) => s.coachName === coachName || s.coachName2 === coachName,
     );
