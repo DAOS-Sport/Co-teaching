@@ -112,6 +112,8 @@ export const schedules = pgTable("schedules", {
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
+  // Bumped on every write; editors send the version they saw (#8).
+  version: integer("version").notNull().default(1),
 }, (table) => [
   // Hot-path indexes — the schedule table is queried predominantly by
   // date range (week views, daily push) and by coach name (coach
@@ -431,6 +433,7 @@ export const insertScheduleSchema = createInsertSchema(schedules).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
+  version: true,
 });
 
 export const insertUserSchema = createInsertSchema(users).omit({

@@ -17,7 +17,7 @@ import { format, addWeeks, subWeeks, startOfWeek } from "date-fns";
 import { zhTW } from "date-fns/locale";
 import FloatingConflictAlert from "@/components/floating-conflict-alert";
 import AdminLayout from "@/components/admin-layout";
-import { apiRequestWithConfirm } from "@/lib/queryClient";
+import { apiRequestWithConfirm, cachedScheduleVersion } from "@/lib/queryClient";
 import { useLocation } from "wouter";
 import {
   AlertDialog,
@@ -422,6 +422,7 @@ function CoachAssignmentContent() {
       if (coachName2 !== undefined) body.coachName2 = coachName2;
       if (coach1IsTeaching !== undefined) body.coach1IsTeaching = coach1IsTeaching;
       if (coach2IsTeaching !== undefined) body.coach2IsTeaching = coach2IsTeaching;
+      body.expectedVersion = cachedScheduleVersion(scheduleId);
       // This page shows its own 衝堂提醒 before assigning, so the server's
       // conflict check is pre-confirmed; availability is still asked.
       const res = await apiRequestWithConfirm(

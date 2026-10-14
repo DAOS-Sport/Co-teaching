@@ -39,6 +39,35 @@ export async function apiRequest(
   return res;
 }
 
+const isScheduleListKey = (key: readonly unknown[]) =>
+  typeof key[0] === "string" && key[0].includes("/api/schedules");
+
+type CachedSchedule = { id?: unknown; version?: unknown };
+
+/** The version of a schedule row as this page last loaded it (#8). */
+export function cachedScheduleVersion(id: string): number | undefined {
+  const cached = queryClient.getQueriesData<CachedSchedule[]>({
+    predicate: (query) => isScheduleListKey(query.queryKey),
+  });
+  for (const [, rows] of cached) {
+    if (!Array.isArray(rows)) continue;
+    const row = rows.find((candidate) => candidate?.id === id);
+    if (row && typeof row.version === "number") return row.version;
+  }
+  return undefined;
+}
+
+/** Puts a saved row's new version into every cached schedule list right away. */
+function applySavedSchedule(saved: unknown) {
+  if (!saved || typeof saved !== "object") return;
+  const { venue: _venue, timeSlot: _timeSlot, ...fields } = saved as Record<string, unknown>;
+  if (typeof fields.id !== "string" || typeof fields.version !== "number") return;
+  queryClient.setQueriesData<CachedSchedule[]>(
+    { predicate: (query) => isScheduleListKey(query.queryKey) },
+    (rows) => (Array.isArray(rows) ? rows.map((row) => (row?.id === fields.id ? { ...row, ...fields } : row)) : rows),
+  );
+}
+
 interface ScheduleWarning {
   code: string;
   message: string;
@@ -78,7 +107,16 @@ export async function apiRequestWithConfirm(
     }
   }
 
+  if (!res.ok) {
+    const body = await res.clone().json().catch(() => null);
+    // Someone else saved this row first: reload so the next try uses fresh data.
+    if (body?.code === "VERSION_CONFLICT") {
+      queryClient.invalidateQueries({ predicate: (query) => isScheduleListKey(query.queryKey) });
+    }
+    if (typeof body?.message === "string") throw new Error(body.message);
+  }
   await throwIfResNotOk(res);
+  if (method !== "DELETE") applySavedSchedule(await res.clone().json().catch(() => null));
   return res;
 }
 

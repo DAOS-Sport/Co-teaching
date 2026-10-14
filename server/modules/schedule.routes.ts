@@ -10,6 +10,7 @@ import {
 } from "./scheduleImport.service";
 import type { ScheduleImportMode } from "@shared/scheduleImport";
 import { promoteCoachSlots, sameCoach } from "@shared/scheduleRules";
+import { ScheduleVersionConflictError } from "../repositories/schedule.repository";
 import {
   SCHEDULE_LOCKED,
   confirmRequired,
@@ -21,6 +22,17 @@ type ScheduleUpdate = Parameters<typeof storage.updateSchedule>[1];
 const isDuplicateCoach = sameCoach;
 const isPgUniqueViolation = (error: unknown) =>
   !!error && typeof error === "object" && "code" in error && error.code === "23505";
+
+// #8: every edit or delete carries the schedule version the editor loaded.
+const VERSION_REQUIRED = { code: "VERSION_REQUIRED", message: "請重新整理頁面後再操作" } as const;
+const VERSION_CONFLICT = {
+  code: "VERSION_CONFLICT",
+  message: "這筆課程剛被其他人修改過，畫面已重新整理，請確認後再操作一次",
+} as const;
+const readExpectedVersion = (value: unknown): number | null => {
+  const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof parsed === "number" && Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+};
 
 export function registerScheduleRoutes(app: Express): void {
   // ── Static `/api/schedules/...` routes FIRST so Express does not match
@@ -227,6 +239,9 @@ export function registerScheduleRoutes(app: Express): void {
           req.body;
         const existing = await storage.getScheduleById(req.params.id);
         if (!existing) return res.status(404).json({ message: "Schedule not found" });
+        const expectedVersion = readExpectedVersion(req.body?.expectedVersion);
+        if (expectedVersion === null) return res.status(428).json(VERSION_REQUIRED);
+        if (existing.version !== expectedVersion) return res.status(409).json(VERSION_CONFLICT);
         const nextCoach1 = coachName !== undefined ? coachName : existing.coachName;
         const nextCoach2 = coachName2 !== undefined ? coachName2 : existing.coachName2;
         if (isDuplicateCoach(nextCoach1, nextCoach2)) {
@@ -258,20 +273,21 @@ export function registerScheduleRoutes(app: Express): void {
           if (promoted) Object.assign(updateData, promoted);
           const schedule = await storage.updateSchedule(
             req.params.id,
-            updateData
+            updateData,
+            expectedVersion
           );
           return res.json(schedule);
         }
         if (coach1IsTeaching !== undefined) {
           const schedule = await storage.updateSchedule(req.params.id, {
             coach1IsTeaching: !!coach1IsTeaching,
-          });
+          }, expectedVersion);
           return res.json(schedule);
         }
         if (coach2IsTeaching !== undefined) {
           const schedule = await storage.updateSchedule(req.params.id, {
             coach2IsTeaching: !!coach2IsTeaching,
-          });
+          }, expectedVersion);
           return res.json(schedule);
         }
         // Clearing slot 1 must not strand a coach in slot 2 — promote them.
@@ -282,10 +298,11 @@ export function registerScheduleRoutes(app: Express): void {
           coach2IsTeaching: !!existing.coach2IsTeaching,
         });
         const schedule = promoted
-          ? await storage.updateSchedule(req.params.id, promoted)
-          : await storage.assignCoach(req.params.id, coachName || null);
+          ? await storage.updateSchedule(req.params.id, promoted, expectedVersion)
+          : await storage.assignCoach(req.params.id, coachName || null, expectedVersion);
         res.json(schedule);
       } catch (error) {
+        if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);
         res.status(500).json({ message: "Failed to assign coach" });
       }
     }
@@ -299,6 +316,9 @@ export function registerScheduleRoutes(app: Express): void {
         const { className, coachName } = req.body;
         const existing = await storage.getScheduleById(req.params.id);
         if (!existing) return res.status(404).json({ message: "Schedule not found" });
+        const expectedVersion = readExpectedVersion(req.body?.expectedVersion);
+        if (expectedVersion === null) return res.status(428).json(VERSION_REQUIRED);
+        if (existing.version !== expectedVersion) return res.status(409).json(VERSION_CONFLICT);
         if (isDuplicateCoach(coachName, existing.coachName2)) {
           return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
         }
@@ -323,9 +343,10 @@ export function registerScheduleRoutes(app: Express): void {
           coach2IsTeaching: !!existing.coach2IsTeaching,
         });
         if (promoted) Object.assign(updateData, promoted);
-        const schedule = await storage.updateSchedule(req.params.id, updateData);
+        const schedule = await storage.updateSchedule(req.params.id, updateData, expectedVersion);
         res.json(schedule);
       } catch (error) {
+        if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);
         if (isPgUniqueViolation(error)) {
           return res.status(409).json({ code: "DUPLICATE_CLASS_IN_CELL", message: "此時段已經有相同班級" });
         }
@@ -370,6 +391,9 @@ export function registerScheduleRoutes(app: Express): void {
           updateData.coach2IsTeaching = !!coach2IsTeaching;
         const existing = await storage.getScheduleById(req.params.id);
         if (!existing) return res.status(404).json({ message: "Schedule not found" });
+        const expectedVersion = readExpectedVersion(req.body?.expectedVersion);
+        if (expectedVersion === null) return res.status(428).json(VERSION_REQUIRED);
+        if (existing.version !== expectedVersion) return res.status(409).json(VERSION_CONFLICT);
         const nextCoach1 = updateData.coachName !== undefined ? updateData.coachName : existing.coachName;
         const nextCoach2 = updateData.coachName2 !== undefined ? updateData.coachName2 : existing.coachName2;
         if (isDuplicateCoach(nextCoach1, nextCoach2)) {
@@ -396,10 +420,12 @@ export function registerScheduleRoutes(app: Express): void {
         if (promoted) Object.assign(updateData, promoted);
         const schedule = await storage.updateSchedule(
           req.params.id,
-          updateData
+          updateData,
+          expectedVersion
         );
         res.json(schedule);
       } catch (error) {
+        if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);
         if (isPgUniqueViolation(error)) {
           return res.status(409).json({ code: "DUPLICATE_CLASS_IN_CELL", message: "此時段已經有相同班級" });
         }
@@ -414,14 +440,19 @@ export function registerScheduleRoutes(app: Express): void {
     async (req, res) => {
       try {
         const existing = await storage.getScheduleById(req.params.id);
-        if (existing?.isClassLocked) {
+        if (!existing) return res.status(404).json({ message: "Schedule not found" });
+        const expectedVersion = readExpectedVersion(req.query.expectedVersion);
+        if (expectedVersion === null) return res.status(428).json(VERSION_REQUIRED);
+        if (existing.version !== expectedVersion) return res.status(409).json(VERSION_CONFLICT);
+        if (existing.isClassLocked) {
           return res
             .status(409)
-            .json({ message: "課表已鎖定，請先解鎖該週才能刪除" });
+            .json({ code: "SCHEDULE_LOCKED", message: "課表已鎖定，請先解鎖該週才能刪除" });
         }
-        await storage.deleteSchedule(req.params.id);
+        await storage.deleteSchedule(req.params.id, expectedVersion);
         res.json({ success: true });
       } catch (error) {
+        if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);
         res.status(500).json({ message: "Failed to delete schedule" });
       }
     }

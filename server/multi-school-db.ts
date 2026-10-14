@@ -207,6 +207,10 @@ export async function initializeSchoolSchema(schoolCode: string) {
     await mainDb.execute(sql`
       ALTER TABLE ${schemaIdent}.schedules ADD COLUMN IF NOT EXISTS is_class_locked BOOLEAN NOT NULL DEFAULT false;
     `);
+    // Shares the main schedules table definition, which now has a version (#8).
+    await mainDb.execute(sql`
+      ALTER TABLE ${schemaIdent}.schedules ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+    `);
 
     // 創建 teachers 表
     await mainDb.execute(sql`

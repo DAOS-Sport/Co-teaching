@@ -2,7 +2,7 @@ import { isPlaceholderCoach } from "@shared/scheduleRules";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useRef, useImperativeHandle, forwardRef } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, apiRequestWithConfirm } from "@/lib/queryClient";
+import { apiRequestWithConfirm, cachedScheduleVersion } from "@/lib/queryClient";
 import CoachAutocomplete from "./coach-autocomplete";
 import type { Venue, TimeSlot, Schedule } from "@shared/schema";
 import { format, addDays, startOfWeek } from "date-fns";
@@ -143,7 +143,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
           s.timeSlotId === scheduleData.timeSlotId
         );
         if (existingSchedule) {
-          const response = await apiRequest('DELETE', `/api/schedules/${existingSchedule.id}`);
+          const response = await apiRequestWithConfirm('DELETE', `/api/schedules/${existingSchedule.id}?expectedVersion=${existingSchedule.version}`, {});
           return response.json();
         }
         return null;
@@ -179,7 +179,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
 
   const deleteMutation = useMutation({
     mutationFn: async (scheduleId: string) => {
-      const response = await apiRequest('DELETE', `/api/schedules/${scheduleId}`);
+      const response = await apiRequestWithConfirm('DELETE', `/api/schedules/${scheduleId}?expectedVersion=${cachedScheduleVersion(scheduleId) ?? ""}`, {});
       return response.json();
     },
     onSuccess: () => {
@@ -266,6 +266,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
       const response = await apiRequestWithConfirm('PUT', `/api/schedules/${updateData.scheduleId}`, {
         className: updateData.className,
         coachName: updateData.coachName,
+        expectedVersion: cachedScheduleVersion(updateData.scheduleId),
       });
       return response.json();
     },

@@ -7,6 +7,7 @@ import { format, addWeeks, subWeeks, startOfWeek, addDays } from "date-fns";
 import { zhTW } from "date-fns/locale";
 import FloatingConflictAlert from "@/components/floating-conflict-alert";
 import AdminLayout from "@/components/admin-layout";
+import { apiRequestWithConfirm, cachedScheduleVersion } from "@/lib/queryClient";
 import { useLocation } from "wouter";
 import {
   Dialog,
@@ -367,16 +368,11 @@ function VenueScheduleEditContent() {
 
   const deleteMutation = useMutation({
     mutationFn: async (scheduleId: string) => {
-      const response = await fetch(`/api/schedules/${scheduleId}`, {
-        method: "DELETE",
-        headers: {
-          "x-admin-password": adminPassword,
-        },
-      });
-      if (!response.ok) {
-        const text = (await response.text()) || response.statusText;
-        throw new Error(`${response.status}: ${text}`);
-      }
+      const response = await apiRequestWithConfirm(
+        "DELETE",
+        `/api/schedules/${scheduleId}?expectedVersion=${cachedScheduleVersion(scheduleId) ?? ""}`,
+        {},
+      );
       return response.json();
     },
     onSuccess: () => {
@@ -390,10 +386,9 @@ function VenueScheduleEditContent() {
     },
     onError: (error: unknown) => {
       const msg = error instanceof Error ? error.message : String(error);
-      let description = `刪除失敗：${msg}`;
-      if (msg.includes("409") || msg.includes("課表已鎖定")) {
-        description = "課表已鎖定，請先解鎖該週才能刪除";
-      } else if (msg.includes("401")) {
+      // Server messages (locked week, changed by someone else) are shown as-is.
+      let description = msg;
+      if (msg.includes("401") || msg.includes("需要管理員密碼")) {
         description = "密碼驗證失敗，請重新登入";
       }
       toast({
@@ -412,15 +407,10 @@ function VenueScheduleEditContent() {
       scheduleId: string;
       coachCount: number;
     }) => {
-      const response = await fetch(`/api/schedules/${scheduleId}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "x-admin-password": adminPassword,
-        },
-        body: JSON.stringify({ coachCount }),
+      const response = await apiRequestWithConfirm("PATCH", `/api/schedules/${scheduleId}`, {
+        coachCount,
+        expectedVersion: cachedScheduleVersion(scheduleId),
       });
-      if (!response.ok) throw new Error(await response.text());
       return response.json();
     },
     onSuccess: () => {

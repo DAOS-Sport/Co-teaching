@@ -190,7 +190,10 @@ export async function commitScheduleImport(venueId: string, text: string, mode: 
         updatedAt: now,
       };
       if (row.status === "update" && row.existingScheduleId) {
-        await tx.update(schedules).set(values).where(eq(schedules.id, row.existingScheduleId));
+        await tx
+          .update(schedules)
+          .set({ ...values, version: sql`${schedules.version} + 1` })
+          .where(eq(schedules.id, row.existingScheduleId));
       } else {
         await tx.insert(schedules).values(values);
       }

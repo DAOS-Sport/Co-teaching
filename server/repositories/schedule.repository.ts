@@ -43,6 +43,7 @@ const scheduleSelect = {
   notes: schedules.notes,
   createdAt: schedules.createdAt,
   updatedAt: schedules.updatedAt,
+  version: schedules.version,
   venue: venues,
   timeSlot: timeSlots,
 };
@@ -60,6 +61,22 @@ export type ScheduleUpdateFields = Partial<{
   isClassLocked: boolean;
   notes: string | null;
 }>;
+
+/** The row changed since the editor loaded it (or is gone). */
+export class ScheduleVersionConflictError extends Error {
+  constructor() {
+    super("SCHEDULE_VERSION_CONFLICT");
+    this.name = "ScheduleVersionConflictError";
+  }
+}
+
+const bumpVersion = () => sql`${schedules.version} + 1`;
+
+/** Matches the row, and when the caller supplied one, the version it saw. */
+const rowAtVersion = (id: string, expectedVersion?: number) =>
+  expectedVersion === undefined
+    ? eq(schedules.id, id)
+    : and(eq(schedules.id, id), eq(schedules.version, expectedVersion));
 
 export class ScheduleRepository {
   async copyWeekIntoEmptyCells(input: {
@@ -191,9 +208,10 @@ export class ScheduleRepository {
 
   async updateSchedule(
     id: string,
-    updateData: ScheduleUpdateFields
+    updateData: ScheduleUpdateFields,
+    expectedVersion?: number
   ): Promise<Schedule> {
-    const setData: Record<string, unknown> = { updatedAt: new Date() };
+    const setData: Record<string, unknown> = { updatedAt: new Date(), version: bumpVersion() };
     if (updateData.date !== undefined) setData.date = updateData.date;
     if (updateData.venueId !== undefined) setData.venueId = updateData.venueId;
     if (updateData.timeSlotId !== undefined) setData.timeSlotId = updateData.timeSlotId;
@@ -211,13 +229,18 @@ export class ScheduleRepository {
     const [result] = await db
       .update(schedules)
       .set(setData)
-      .where(eq(schedules.id, id))
+      .where(rowAtVersion(id, expectedVersion))
       .returning();
+    if (!result && expectedVersion !== undefined) throw new ScheduleVersionConflictError();
     return result;
   }
 
-  async deleteSchedule(id: string): Promise<void> {
-    await db.delete(schedules).where(eq(schedules.id, id));
+  async deleteSchedule(id: string, expectedVersion?: number): Promise<void> {
+    const deleted = await db
+      .delete(schedules)
+      .where(rowAtVersion(id, expectedVersion))
+      .returning({ id: schedules.id });
+    if (deleted.length === 0 && expectedVersion !== undefined) throw new ScheduleVersionConflictError();
   }
 
   async getCoachSchedules(
@@ -464,6 +487,7 @@ export class ScheduleRepository {
           notes: result.notes,
           createdAt: result.createdAt,
           updatedAt: result.updatedAt,
+          version: result.version,
           venue: result.venue,
           timeSlot: result.timeSlot,
           registrations: [],
@@ -516,7 +540,7 @@ export class ScheduleRepository {
   ): Promise<void> {
     await db
       .update(schedules)
-      .set({ isClassLocked: true, updatedAt: new Date() })
+      .set({ isClassLocked: true, updatedAt: new Date(), version: bumpVersion() })
       .where(
         and(
           eq(schedules.venueId, venueId),
@@ -532,7 +556,7 @@ export class ScheduleRepository {
   ): Promise<void> {
     await db
       .update(schedules)
-      .set({ isClassLocked: false, updatedAt: new Date() })
+      .set({ isClassLocked: false, updatedAt: new Date(), version: bumpVersion() })
       .where(
         and(
           eq(schedules.venueId, venueId),
@@ -543,13 +567,15 @@ export class ScheduleRepository {
 
   async assignCoach(
     scheduleId: string,
-    coachName: string | null
+    coachName: string | null,
+    expectedVersion?: number
   ): Promise<Schedule> {
     const [result] = await db
       .update(schedules)
-      .set({ coachName, updatedAt: new Date() })
-      .where(eq(schedules.id, scheduleId))
+      .set({ coachName, updatedAt: new Date(), version: bumpVersion() })
+      .where(rowAtVersion(scheduleId, expectedVersion))
       .returning();
+    if (!result && expectedVersion !== undefined) throw new ScheduleVersionConflictError();
     return result;
   }
 

@@ -99,7 +99,7 @@ test("#6 schedule writes enforce lock, conflict and availability rules on the se
   const { storage } = await import("./storage");
   const { env } = await import("./config/env");
   // 2026-10-14 is a Wednesday (day 3); its week starts Monday 2026-10-12.
-  const base = { date: "2026-10-14", timeSlotId: "slot-3", coachName2: null, coachCount: 2, coach1IsTeaching: true, coach2IsTeaching: false, notes: null };
+  const base = { date: "2026-10-14", timeSlotId: "slot-3", coachName2: null, coachCount: 2, coach1IsTeaching: true, coach2IsTeaching: false, notes: null, version: 1 };
   const rows = [
     { ...base, id: "locked-row", venueId: "v1", className: "A班", coachName: null, isClassLocked: true, venue: { name: "場館一" } },
     { ...base, id: "other-venue", venueId: "v2", className: "B班", coachName: "王教練", isClassLocked: false, venue: { name: "場館二" } },
@@ -145,22 +145,91 @@ test("#6 schedule writes enforce lock, conflict and availability rules on the se
   try {
     // Locked venue/date: class names are frozen, coach assignment still allowed.
     await expectBlocked("POST", "/api/schedules", { date: "2026-10-14", venueId: "v1", timeSlotId: "slot-3", className: "新班" }, "SCHEDULE_LOCKED");
-    await expectBlocked("PUT", "/api/schedules/locked-row", { className: "改名", coachName: null }, "SCHEDULE_LOCKED");
-    await expectSaved("PUT", "/api/schedules/locked-row", { className: "A班", coachName: "林教練" });
+    await expectBlocked("PUT", "/api/schedules/locked-row", { expectedVersion: 1, className: "改名", coachName: null }, "SCHEDULE_LOCKED");
+    await expectSaved("PUT", "/api/schedules/locked-row", { expectedVersion: 1, className: "A班", coachName: "林教練" });
     // Cross-venue conflict needs confirmation, then goes through.
-    await expectBlocked("PUT", "/api/schedules/locked-row/assign-coach", { coachName: "王教練" }, "CONFIRM_REQUIRED", "COACH_CONFLICT");
-    await expectBlocked("PATCH", "/api/schedules/locked-row", { coachName2: "王教練" }, "CONFIRM_REQUIRED", "COACH_CONFLICT");
+    await expectBlocked("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "王教練" }, "CONFIRM_REQUIRED", "COACH_CONFLICT");
+    await expectBlocked("PATCH", "/api/schedules/locked-row", { expectedVersion: 1, coachName2: "王教練" }, "CONFIRM_REQUIRED", "COACH_CONFLICT");
     await expectBlocked("POST", "/api/schedules", { date: "2026-10-14", venueId: "v4", timeSlotId: "slot-3", className: "D班", coachName: "王教練" }, "CONFIRM_REQUIRED", "COACH_CONFLICT");
-    await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { coachName: "王教練", confirmWarnings: ["COACH_CONFLICT"] });
+    await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "王教練", confirmWarnings: ["COACH_CONFLICT"] });
     // Filled availability this week but not this slot: needs confirmation.
-    await expectBlocked("PUT", "/api/schedules/locked-row/assign-coach", { coachName: "陳教練" }, "CONFIRM_REQUIRED", "COACH_UNAVAILABLE");
-    await expectBlocked("PUT", "/api/schedules/locked-row/assign-coach", { coachName: "陳教練", confirmWarnings: ["COACH_CONFLICT"] }, "CONFIRM_REQUIRED", "COACH_UNAVAILABLE");
-    await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { coachName: "陳教練", confirmWarnings: ["COACH_UNAVAILABLE"] });
+    await expectBlocked("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "陳教練" }, "CONFIRM_REQUIRED", "COACH_UNAVAILABLE");
+    await expectBlocked("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "陳教練", confirmWarnings: ["COACH_CONFLICT"] }, "CONFIRM_REQUIRED", "COACH_UNAVAILABLE");
+    await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "陳教練", confirmWarnings: ["COACH_UNAVAILABLE"] });
     // No availability filled at all, placeholders and unchanged coaches are not nagged.
-    await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { coachName: "張教練" });
-    await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { coachName: "000" });
-    await expectSaved("PUT", "/api/schedules/dup-row", { className: "C班改", coachName: "王教練" });
+    await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "張教練" });
+    await expectSaved("PUT", "/api/schedules/locked-row/assign-coach", { expectedVersion: 1, coachName: "000" });
+    await expectSaved("PUT", "/api/schedules/dup-row", { expectedVersion: 1, className: "C班改", coachName: "王教練" });
     await expectSaved("POST", "/api/schedules", { date: "2026-10-14", venueId: "v4", timeSlotId: "slot-3", className: "E班" });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+  }
+});
+
+test("#8 schedule writes need the version the editor saw; stale or concurrent saves are refused", async () => {
+  process.env.REPLIT_DOMAINS ??= "test.invalid";
+  const express = (await import("express")).default;
+  const { registerScheduleRoutes } = await import("./modules/schedule.routes");
+  const { ScheduleVersionConflictError } = await import("./repositories/schedule.repository");
+  const { storage } = await import("./storage");
+  const { env } = await import("./config/env");
+  const row = { id: "row", date: "2099-01-07", venueId: "v1", timeSlotId: "slot-3", className: "A班", coachName: null, coachName2: null, coachCount: 2, coach1IsTeaching: true, coach2IsTeaching: false, isClassLocked: false, notes: null, version: 3, venue: { name: "場館一" } };
+  const writes: unknown[] = [];
+  let raceOnNextWrite = false;
+  const write = (id: string, update: object, expectedVersion?: number) => {
+    // A concurrent save landing between our read and our write.
+    if (raceOnNextWrite || (expectedVersion !== undefined && expectedVersion !== row.version)) {
+      raceOnNextWrite = false;
+      throw new ScheduleVersionConflictError();
+    }
+    writes.push([id, update, expectedVersion]);
+    return { ...row, ...update, version: row.version + 1 };
+  };
+  Object.assign(storage, {
+    getScheduleById: async (id: string) => (id === row.id ? row : undefined),
+    getSchedulesByDate: async () => [row],
+    getTimeSlots: async () => [{ id: "slot-3", order: 3 }],
+    getCoachAvailabilityByWeek: async () => [],
+    updateSchedule: async (id: string, update: object, expectedVersion?: number) => write(id, update, expectedVersion),
+    assignCoach: async (id: string, coachName: string | null, expectedVersion?: number) => write(id, { coachName }, expectedVersion),
+    deleteSchedule: async (id: string, expectedVersion?: number) => { write(id, { deleted: true }, expectedVersion); },
+  });
+  const app = express();
+  app.use(express.json());
+  registerScheduleRoutes(app);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const send = async (method: string, path: string, body?: object) => {
+    const res = await fetch(url + path, { method, headers: { "Content-Type": "application/json", "x-admin-password": env.adminPassword }, body: body ? JSON.stringify(body) : undefined });
+    return { status: res.status, body: await res.json().catch(() => ({})) };
+  };
+  const expect = async (method: string, path: string, body: object | undefined, status: number, code?: string) => {
+    const before = writes.length;
+    const res = await send(method, path, body);
+    assert.equal(res.status, status, `${method} ${path} ${JSON.stringify(body)} -> ${JSON.stringify(res.body)}`);
+    if (code) assert.equal(res.body.code, code);
+    if (status !== 200) assert.equal(writes.length, before, "a refused request must not write");
+  };
+  try {
+    await expect("PUT", "/api/schedules/row", { className: "A班", coachName: null }, 428, "VERSION_REQUIRED");
+    await expect("PUT", "/api/schedules/row", { className: "A班改", coachName: null, expectedVersion: 2 }, 409, "VERSION_CONFLICT");
+    await expect("PATCH", "/api/schedules/row", { coachCount: 1 }, 428, "VERSION_REQUIRED");
+    await expect("PATCH", "/api/schedules/row", { coachCount: 1, expectedVersion: 2 }, 409, "VERSION_CONFLICT");
+    await expect("PUT", "/api/schedules/row/assign-coach", { coachName: "王教練" }, 428, "VERSION_REQUIRED");
+    await expect("PUT", "/api/schedules/row/assign-coach", { coachName: "王教練", expectedVersion: 2 }, 409, "VERSION_CONFLICT");
+    await expect("DELETE", "/api/schedules/row", undefined, 428, "VERSION_REQUIRED");
+    await expect("DELETE", "/api/schedules/row?expectedVersion=2", undefined, 409, "VERSION_CONFLICT");
+    // Someone else saves between our read and our write: still refused.
+    raceOnNextWrite = true;
+    await expect("PUT", "/api/schedules/row", { className: "A班改", coachName: null, expectedVersion: 3 }, 409, "VERSION_CONFLICT");
+    // The version the editor saw goes through, and is what the write is conditioned on.
+    await expect("PUT", "/api/schedules/row", { className: "A班改", coachName: null, expectedVersion: 3 }, 200);
+    assert.equal((writes.at(-1) as unknown[])[2], 3);
+    await expect("PUT", "/api/schedules/row/assign-coach", { coachName: "王教練", expectedVersion: 3 }, 200);
+    await expect("PATCH", "/api/schedules/row", { coachCount: 1, expectedVersion: 3 }, 200);
+    await expect("DELETE", "/api/schedules/row?expectedVersion=3", undefined, 200);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
