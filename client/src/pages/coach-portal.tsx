@@ -473,8 +473,10 @@ function ApprovedDashboard({
     queryFn: async () => {
       const venueIds = todaySchedules.map(s => s.venueId);
       if (!venueIds.length) return [];
+      const coachToken = sessionStorage.getItem("coach_portal_token") || "";
       const res = await fetch(
-        `/api/coach-portal/colleagues?coachName=${encodeURIComponent(coachName)}&date=${today}&venueIds=${venueIds.join(",")}`
+        `/api/coach-portal/colleagues?coachName=${encodeURIComponent(coachName)}&date=${today}&venueIds=${venueIds.join(",")}`,
+        { headers: coachToken ? { "x-coach-token": coachToken } : {} }
       );
       if (!res.ok) return [];
       return res.json();

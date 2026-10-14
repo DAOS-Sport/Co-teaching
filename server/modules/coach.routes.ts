@@ -34,7 +34,7 @@ export function registerCoachRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/approved-coaches", async (_req, res) => {
+  app.get("/api/approved-coaches", requireAdminPassword, async (_req, res) => {
     try {
       const approvedUsers = await storage.getApprovedCoachUsers();
       const names = approvedUsers

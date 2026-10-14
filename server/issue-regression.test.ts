@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { once } from "node:events";
 import { spawnSync } from "node:child_process";
 import { logTimestamp } from "./shared/logTimestamp";
 
@@ -59,4 +60,34 @@ test("same instant logs the same date and offset in UTC and Taipei processes", (
     assert.equal(Date.parse(child.stdout.trim()), Date.parse(instant));
   }
   assert.match(expected, /2026-09-17T16:05:06.123\+00:00/);
+});
+
+test("#2 coach PII endpoints reject anonymous callers before touching the database", async () => {
+  process.env.REPLIT_DOMAINS ??= "test.invalid";
+  const express = (await import("express")).default;
+  const { registerCoachRoutes } = await import("./modules/coach.routes");
+  const { registerCoachPortalRoutes } = await import("./modules/coachPortal.routes");
+  const app = express();
+  app.use(express.json());
+  registerCoachRoutes(app);
+  registerCoachPortalRoutes(app);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  try {
+    for (const path of [
+      "/api/approved-coaches",
+      "/api/coach-portal/approved-coaches",
+      "/api/coach-portal/linkable-coaches",
+      "/api/coach-portal/colleagues?coachName=synthetic&date=2026-10-12&venueIds=synthetic",
+    ]) {
+      const res = await fetch(base + path);
+      assert.equal(res.status, 401, path);
+    }
+    // The public /coach page lists names only; it stays public by decision.
+    assert.notEqual((await fetch(base + "/api/coaches")).status, 401);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+  }
 });

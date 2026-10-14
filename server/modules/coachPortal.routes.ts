@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import type { Express, Request } from "express";
 import { storage } from "../storage";
 import { consumeLineLoginToken } from "./auth.routes";
 import { env } from "../config/env";
@@ -9,11 +9,25 @@ import {
   resolveCoachToken,
   verifyCoachSessionFor,
 } from "../shared/auth/coachPortalSession";
-import { verifyAdminPassword } from "../shared/auth/adminPassword";
+import { requireAdminPassword, verifyAdminPassword } from "../shared/auth/adminPassword";
+
+/**
+ * Admin, or the logged-in coach asking about themselves. Returns the HTTP
+ * status to reject with, or null when allowed. Anonymous callers are
+ * rejected before any database read.
+ */
+async function rejectUnlessCoachSelfOrAdmin(req: Request, coachName: string): Promise<401 | 403 | null> {
+  if (verifyAdminPassword(req)) return null;
+  const session = await resolveCoachToken(req);
+  if (!session) return 401;
+  const authUser = await storage.getCoachUserById(session.coachUserId);
+  const authName = authUser?.linkedCoachName ?? authUser?.name;
+  return authName && authName === coachName ? null : 403;
+}
 
 export function registerCoachPortalRoutes(app: Express): void {
   // Linkable coaches (already approved but no LINE binding yet)
-  app.get("/api/coach-portal/linkable-coaches", async (_req, res) => {
+  app.get("/api/coach-portal/linkable-coaches", requireAdminPassword, async (_req, res) => {
     try {
       const approved = await storage.getApprovedCoachUsers();
       const linkable = approved
@@ -221,6 +235,11 @@ export function registerCoachPortalRoutes(app: Express): void {
       if (!coachName || !date || !venueIdsStr) {
         return res.status(400).json({ message: "缺少必要參數" });
       }
+      // Returns colleagues' phone numbers: only for that coach or an admin.
+      const rejected = await rejectUnlessCoachSelfOrAdmin(req, coachName);
+      if (rejected) {
+        return res.status(rejected).json({ message: rejected === 401 ? "請先登入" : "無權限查看", code: "session_expired" });
+      }
       const venueIds = venueIdsStr.split(",").map((v) => v.trim()).filter(Boolean);
       const colleagues = await storage.getColleaguesForCoach(
         coachName,
@@ -234,7 +253,7 @@ export function registerCoachPortalRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/coach-portal/approved-coaches", async (_req, res) => {
+  app.get("/api/coach-portal/approved-coaches", requireAdminPassword, async (_req, res) => {
     try {
       const users = await storage.getApprovedCoachUsers();
       res.json(users);
