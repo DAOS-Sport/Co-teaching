@@ -10,6 +10,29 @@ import {
   verifyCoachSessionFor,
 } from "../shared/auth/coachPortalSession";
 import { requireAdminPassword, verifyAdminPassword } from "../shared/auth/adminPassword";
+import { inTransaction } from "../shared/dbContext";
+import { ADMIN_ACTOR, coachActor, coachFields, recordAudit, requestIdOf } from "../shared/audit";
+
+/** #3: the coach binds their own LINE to an existing account. */
+async function auditedLineLink(req: Request, coachUserId: string, lineId: string) {
+  const before = await storage.getCoachUserById(coachUserId);
+  return inTransaction(async () => {
+    const updated = await storage.updateCoachUserLineId(coachUserId, lineId);
+    if (updated) {
+      await recordAudit({
+        actor: coachActor(updated.name),
+        requestId: requestIdOf(req),
+        action: "coach.link",
+        entity: "coach_user",
+        entityId: coachUserId,
+        before: coachFields(before),
+        after: coachFields(updated),
+        reason: updated.name,
+      });
+    }
+    return updated;
+  });
+}
 
 /**
  * Admin, or the logged-in coach asking about themselves. Returns the HTTP
@@ -56,10 +79,7 @@ export function registerCoachPortalRoutes(app: Express): void {
         const coachToken = await issueCoachSessionToken(existing.id, tokenData.lineId);
         return res.json({ ...existing, coachToken });
       }
-      const updated = await storage.updateCoachUserLineId(
-        coachUserId,
-        tokenData.lineId
-      );
+      const updated = await auditedLineLink(req, coachUserId, tokenData.lineId);
       if (!updated) {
         return res.status(404).json({ message: "找不到教練帳號" });
       }
@@ -102,10 +122,7 @@ export function registerCoachPortalRoutes(app: Express): void {
       );
 
       if (matched) {
-        const updated = await storage.updateCoachUserLineId(
-          matched.id,
-          tokenData.lineId
-        );
+        const updated = await auditedLineLink(req, matched.id, tokenData.lineId);
         if (!updated) {
           return res.status(404).json({ message: "找不到教練帳號" });
         }
@@ -153,14 +170,26 @@ export function registerCoachPortalRoutes(app: Express): void {
         return res.json({ ...existingUser, coachToken });
       }
 
-      const coachUser = await storage.createCoachUser({
-        lineId: tokenData.lineId,
-        name: name.trim(),
-        phone: phone?.trim() || null,
-        email: email?.trim() || null,
-        status: "pending",
-        role: "coach",
-        linkedCoachName: null,
+      const coachUser = await inTransaction(async () => {
+        const created = await storage.createCoachUser({
+          lineId: tokenData.lineId,
+          name: name.trim(),
+          phone: phone?.trim() || null,
+          email: email?.trim() || null,
+          status: "pending",
+          role: "coach",
+          linkedCoachName: null,
+        });
+        await recordAudit({
+          actor: coachActor(created.name),
+          requestId: requestIdOf(req),
+          action: "coach.register",
+          entity: "coach_user",
+          entityId: created.id,
+          after: coachFields(created),
+          reason: created.name,
+        });
+        return created;
       });
 
       const coachToken = await issueCoachSessionToken(coachUser.id, tokenData.lineId);
@@ -297,7 +326,8 @@ export function registerCoachPortalRoutes(app: Express): void {
           .json({ message: "Missing coachName, weekStart, or slots" });
       }
       // 確認寫入者只能修改自己的資料（管理員可繞過）
-      if (!verifyAdminPassword(req)) {
+      const isAdmin = verifyAdminPassword(req);
+      if (!isAdmin) {
         const session = await resolveCoachToken(req);
         if (!session) {
           return res.status(401).json({ message: "請先登入", code: "session_expired" });
@@ -321,11 +351,24 @@ export function registerCoachPortalRoutes(app: Express): void {
             .json({ message: "dayOfWeek must be 1-7, timeSlotOrder must be 1-7" });
         }
       }
-      await storage.upsertCoachAvailability(
-        coachName,
-        weekStart,
-        availableSlots
-      );
+      const previousSlots = (await storage.getCoachAvailabilityForCoach(coachName, weekStart)).length;
+      await inTransaction(async () => {
+        await storage.upsertCoachAvailability(
+          coachName,
+          weekStart,
+          availableSlots
+        );
+        await recordAudit({
+          actor: isAdmin ? ADMIN_ACTOR : coachActor(coachName),
+          requestId: requestIdOf(req),
+          action: "availability.save",
+          entity: "coach_availability",
+          entityId: coachName,
+          before: { weekStart, slots: previousSlots },
+          after: { weekStart, slots: availableSlots.length },
+          reason: `${coachName} ${weekStart} 當週`,
+        });
+      });
       res.json({ success: true });
     } catch (error) {
       console.error("Error saving coach availability:", error);

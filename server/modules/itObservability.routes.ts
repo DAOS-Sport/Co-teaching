@@ -2,6 +2,7 @@ import type { Express, Response } from "express";
 import { and, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import { db } from "../db";
 import { appLog, operationAudit, ragicSyncItems, ragicSyncRuns } from "@shared/schema";
+import { AUDIT_ENTITY_GROUPS } from "@shared/auditActions";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
 import { displayRunStatus } from "../ragic.logic";
 
@@ -14,13 +15,10 @@ const clampLimit = (value: unknown, fallback: number, max: number): number => {
 };
 
 /** Activity filter groups shown on the IT page. */
-export const ACTIVITY_GROUPS: Record<string, string[]> = {
-  schedule: ["schedule", "schedule_week", "schedule_import"],
-  venue: ["venue", "venue_info"],
-  availability: ["coach_availability"],
-  coach: ["coach_user", "coach_rules"],
-  trigger: ["notification", "ragic_sync", "weekly_push"],
-};
+export const ACTIVITY_GROUPS: Record<string, string[]> = {};
+for (const [entity, group] of Object.entries(AUDIT_ENTITY_GROUPS)) {
+  (ACTIVITY_GROUPS[group] ??= []).push(entity);
+}
 
 /** Failed or cut-off runs first, then partial, then running, then clean ones. */
 export function runPriority(displayStatus: string): number {

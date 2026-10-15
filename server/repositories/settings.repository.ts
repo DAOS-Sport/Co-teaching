@@ -6,7 +6,8 @@
  * `server/storage.ts` delegates here.
  */
 import { eq } from "drizzle-orm";
-import { db } from "../db";
+// #3: follows the caller's transaction (see shared/dbContext).
+import { txDb as db } from "../shared/dbContext";
 import {
   users,
   systemSettings,

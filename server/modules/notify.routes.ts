@@ -1,6 +1,8 @@
 import { isRealCoachName } from "@shared/scheduleRules";
-import type { Express } from "express";
+import type { Express, Request } from "express";
 import { format } from "date-fns";
+import type { AuditAction } from "@shared/auditActions";
+import { ADMIN_ACTOR, recordTriggerAudit, requestIdOf } from "../shared/audit";
 import { storage } from "../storage";
 import {
   sendDailyTomorrowNotifications,
@@ -9,6 +11,10 @@ import {
 import { requireAdminPassword } from "../shared/auth/adminPassword";
 import { env } from "../config/env";
 import { fetchWithTimeout } from "../shared/http/fetchWithTimeout";
+
+/** #3: a sent push cannot be rolled back, so it is recorded with its outcome. */
+const triggered = (req: Request, action: AuditAction, entityId: string, after: Record<string, unknown>, reason?: string) =>
+  recordTriggerAudit({ actor: ADMIN_ACTOR, requestId: requestIdOf(req), action, entity: "notification", entityId, after, reason });
 
 export function registerNotifyRoutes(app: Express): void {
   app.get(
@@ -177,9 +183,11 @@ export function registerNotifyRoutes(app: Express): void {
           }
         }
 
+        await triggered(req, "notify.individual", date, { sent: sentCount, failed: failCount }, `${date}，${coachNames.length} 位教練`);
         res.json({ success: true, sentCount, failCount, results });
       } catch (error) {
         console.error("Individual notify error:", error);
+        await triggered(req, "notify.individual", date, { result: "失敗" }, `${date}，${coachNames.length} 位教練`);
         res.status(500).json({ message: "推播發送失敗" });
       }
     }
@@ -188,11 +196,13 @@ export function registerNotifyRoutes(app: Express): void {
   app.post(
     "/api/admin/send-fill-reminder",
     requireAdminPassword,
-    async (_req, res) => {
+    async (req, res) => {
       try {
         const result = await sendFillReminderToCoaches();
+        await triggered(req, "notify.fill_reminder", "fill_reminder", { sent: result.sent });
         res.json({ success: true, sent: result.sent });
       } catch (error) {
+        await triggered(req, "notify.fill_reminder", "fill_reminder", { result: "失敗" });
         res.status(500).json({ message: "推播發送失敗" });
       }
     }
@@ -201,12 +211,14 @@ export function registerNotifyRoutes(app: Express): void {
   app.post(
     "/api/admin/notify-daily",
     requireAdminPassword,
-    async (_req, res) => {
+    async (req, res) => {
       try {
         await sendDailyTomorrowNotifications();
+        await triggered(req, "notify.daily", "daily", { result: "已觸發" });
         res.json({ success: true, message: "每日推播已觸發" });
       } catch (error) {
         console.error("Manual daily notify error:", error);
+        await triggered(req, "notify.daily", "daily", { result: "失敗" });
         res.status(500).json({ message: "推播失敗", error: String(error) });
       }
     }

@@ -1,5 +1,6 @@
 import { and, between, eq, inArray, sql } from "drizzle-orm";
-import { db } from "../db";
+import { txDb as db, inTransaction } from "../shared/dbContext";
+import { MCP_ACTOR, recordAudit, scheduleContext, scheduleFields } from "../shared/audit";
 import { storage } from "../storage";
 import {
   coachAvailability,
@@ -208,8 +209,26 @@ export const schedulingTools = [
   },
 ];
 
+const MUTATING_TOOLS = new Set([
+  "create_or_update_schedules",
+  "update_schedule",
+  "delete_schedules",
+  "set_schedule_lock",
+  "set_recurring_availability",
+  "set_coach_venue_preferences",
+]);
+
+/** #3: writes and their audit row commit together; MCP is the actor. */
+const mcpAudit = (entry: Omit<Parameters<typeof recordAudit>[0], "actor">) =>
+  recordAudit({ actor: MCP_ACTOR, ...entry });
+
 export async function callSchedulingTool(name: string, rawArgs: unknown): Promise<unknown> {
   const args = asObject(rawArgs);
+  if (MUTATING_TOOLS.has(name)) return inTransaction(() => dispatchSchedulingTool(name, args));
+  return dispatchSchedulingTool(name, args);
+}
+
+async function dispatchSchedulingTool(name: string, args: JsonObject): Promise<unknown> {
   switch (name) {
     case "get_scheduling_catalog":
       return getCatalog(optionalBoolean(args, "includeInactiveCoaches") ?? false);
@@ -337,7 +356,17 @@ async function createOrUpdateSchedules(args: JsonObject) {
   if (optionalBoolean(args, "previewOnly")) {
     return previewScheduleImport(venue.id, text, mode);
   }
-  return commitScheduleImport(venue.id, text, mode);
+  const result = await commitScheduleImport(venue.id, text, mode);
+  if (result.committed) {
+    await mcpAudit({
+      action: "schedule.import",
+      entity: "schedule_import",
+      entityId: venue.id,
+      after: { venueName: venue.name, created: result.created, updated: result.updated },
+      reason: venue.name,
+    });
+  }
+  return result;
 }
 
 async function updateSchedule(args: JsonObject) {
@@ -383,6 +412,14 @@ async function updateSchedule(args: JsonObject) {
     update.coach2IsTeaching = false;
   }
   const updated = await storage.updateSchedule(scheduleId, update);
+  await mcpAudit({
+    action: "schedule.update",
+    entity: "schedule",
+    entityId: scheduleId,
+    before: scheduleFields(existing),
+    after: scheduleFields(updated),
+    reason: await scheduleContext(existing),
+  });
   const [detail] = (await storage.getSchedulesByDateRange(updated.date, updated.date)).filter((row) => row.id === scheduleId);
   const assignedCoaches = [updated.coachName, updated.coachName2].filter(isRealCoachName);
   const conflicts = assignedCoaches.length ? await storage.getConflicts(updated.date) : [];
@@ -412,6 +449,13 @@ async function deleteSchedules(args: JsonObject) {
       throw new Error(`有 ${locked.length} 堂課已鎖定；請先解鎖或在使用者明確要求後設 forceLocked=true`);
     }
     const deleted = await tx.delete(schedules).where(inArray(schedules.id, ids)).returning();
+    await mcpAudit({
+      action: "schedule.bulk_delete",
+      entity: "schedule",
+      entityId: ids.length === 1 ? ids[0] : `${ids.length} 筆`,
+      after: { deleted: deleted.length },
+      reason: deleted.slice(0, 5).map((row) => `${row.date} ${row.className ?? ""}`.trim()).join("、") + (deleted.length > 5 ? "…" : ""),
+    });
     return {
       deletedCount: deleted.length,
       deleted: deleted.map((row) => ({
@@ -433,6 +477,13 @@ async function setScheduleLock(args: JsonObject) {
   const locked = requiredBoolean(args, "locked");
   if (locked) await storage.lockSchedules(venue.id, startDate, endDate);
   else await storage.unlockSchedules(venue.id, startDate, endDate);
+  await mcpAudit({
+    action: locked ? "schedule.lock" : "schedule.unlock",
+    entity: "schedule_week",
+    entityId: venue.id,
+    after: { venueName: venue.name, startDate, endDate, locked },
+    reason: `${venue.name} ${startDate} ~ ${endDate}`,
+  });
   return { success: true, venue: venue.name, startDate, endDate, locked };
 }
 
@@ -514,6 +565,13 @@ async function setRecurringAvailability(args: JsonObject) {
         }));
       }
     }
+    await mcpAudit({
+      action: "availability.save",
+      entity: "coach_availability",
+      entityId: coachName,
+      after: { mode, added, removed },
+      reason: `${coachName} ${startDate} ~ ${endDate}`,
+    });
     return {
       success: true,
       coachName,
@@ -547,6 +605,14 @@ async function setCoachVenuePreferences(args: JsonObject) {
     next = current.filter((name) => !removed.has(name));
   }
   await storage.setCoachVenuePreferences(coachName, next);
+  await mcpAudit({
+    action: "availability.venues",
+    entity: "coach_availability",
+    entityId: coachName,
+    before: { venues: current },
+    after: { venues: next },
+    reason: coachName,
+  });
   return { success: true, coachName, mode, venueNames: next };
 }
 

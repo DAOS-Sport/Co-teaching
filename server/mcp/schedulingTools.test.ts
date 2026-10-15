@@ -5,6 +5,11 @@ import assert from "node:assert/strict";
 process.env.DATABASE_URL = "postgres://unused:unused@127.0.0.1:1/isolated";
 const { storage } = await import("../storage");
 const { db } = await import("../db");
+// #3: write tools run in a transaction and add an audit row; stand in for both.
+(db as unknown as { transaction: unknown }).transaction = async (fn: (tx: unknown) => unknown) => fn(db);
+const { setAuditWriterForTest } = await import("../shared/audit");
+const auditRows: any[] = [];
+setAuditWriterForTest(async (entry) => { auditRows.push(entry); });
 const { schedules, venues, timeSlots, coachUsers } = await import("../../shared/schema");
 const { callSchedulingTool } = await import("./schedulingTools");
 const { ScheduleRepository } = await import("../repositories/schedule.repository");
@@ -28,6 +33,8 @@ test("MCP: repeated placeholders, both slots, search, clear and replacement with
   t.mock.method(storage, "getSchedulesByDateRange", async () => rows);
   t.mock.method(storage, "updateSchedule", async (id: string, fields: object) => Object.assign(rows.find(r => r.id === id)!, fields));
   t.mock.method(storage, "getConflicts", (date: string) => repo.getConflicts(date));
+  t.mock.method(storage, "getVenues", async () => [venue, { ...venue, id: "other", name: "另一場館" }]);
+  t.mock.method(storage, "getTimeSlots", async () => [slot]);
   const approvalLookup = t.mock.method(storage, "getApprovedCoachUsers", async () => approved);
   const call = (scheduleId: string, fields: object) => callSchedulingTool("update_schedule", { scheduleId, ...fields }) as Promise<any>;
 
@@ -52,6 +59,9 @@ test("MCP: repeated placeholders, both slots, search, clear and replacement with
   const conflict = await call("third", { coachName: "熊韋程" });
   assert.equal(conflict.conflictWarnings[0].coachName, "熊韋程");
   await assert.rejects(call("second", { coachName2: "熊韋程" }), /同一位教練/);
+  const last = auditRows.at(-1);
+  assert.deepEqual([last.actor, last.action, last.entityId, last.after.coachName], ["MCP", "schedule.update", "third", "熊韋程"]);
+  assert.equal(last.reason, "另一場館 2026-09-30 第1節 third");
 });
 
 test("MCP batch: preview and commit preserve 000 with no approval or conflict warnings", async (t) => {
@@ -59,6 +69,7 @@ test("MCP batch: preview and commit preserve 000 with no approval or conflict wa
   const written: any[] = [];
   const executor: any = {
     execute: async () => undefined,
+    transaction: async (fn: (tx: unknown) => unknown) => fn(executor),
     select: () => ({ from: (table: unknown) => {
       const data = table === venues ? [venue] : table === timeSlots ? [slot] : table === schedules ? existing : table === coachUsers ? approved : [];
       return Object.assign(Promise.resolve(data), { where: async () => data });
@@ -82,6 +93,8 @@ test("MCP batch: preview and commit preserve 000 with no approval or conflict wa
   assert.equal(written.length, 2);
   assert.ok(written.every(r => r.coachName === "000" && r.coachName2 === "000"));
   assert.equal(approvalLookup.mock.callCount(), 0);
+  const imported = auditRows.at(-1);
+  assert.deepEqual([imported.action, imported.after.created, imported.after.updated], ["schedule.import", 1, 1]);
   const realPreview: any = await callSchedulingTool("create_or_update_schedules", { ...args, previewOnly: true, rows: args.rows.map(r => ({ ...r, coachName: "熊韋程" })) });
   assert.ok(realPreview.rows[1].issues.some((i: any) => i.code === "coach_conflict"));
 });

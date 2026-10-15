@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import AdminLayout from "@/components/admin-layout";
 import { Badge } from "@/components/ui/badge";
 import { getQueryFn } from "@/lib/queryClient";
+import { AUDIT_ACTION_LABELS, AUDIT_FIELD_LABELS } from "@shared/auditActions";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -127,54 +128,7 @@ const ACTIVITY_FILTERS: { key: string; label: string }[] = [
   { key: "trigger", label: "推播與同步" },
 ];
 
-const ACTION_LABELS: Record<string, string> = {
-  "schedule.create": "新增課程",
-  "schedule.update": "修改課程",
-  "schedule.patch": "修改教練人數",
-  "schedule.assign": "指派教練",
-  "schedule.delete": "刪除課程",
-  "schedule.lock": "鎖定課表",
-  "schedule.unlock": "解鎖課表",
-  "schedule.copy_week": "複製整週",
-  "schedule.import": "匯入課表",
-  "venue.create": "新增場館",
-  "venue.delete": "刪除場館",
-  "venue_info.update": "修改場館資訊",
-  "availability.save": "儲存可排時段",
-  "coach.status": "審核教練帳號",
-  "coach.rename": "修改教練姓名",
-  "coach.line_bind": "綁定 LINE",
-  "coach.line_clear": "解除 LINE",
-  "coach.register": "教練申請帳號",
-  "coach.link": "教練綁定帳號",
-  "coach_rules.update": "修改教練守則",
-  "notify.daily": "發送明日提醒",
-  "notify.fill_reminder": "提醒填寫時段",
-  "notify.individual": "個別推播",
-  "ragic.sync": "手動 Ragic 同步",
-  "weekly_push.enqueue": "排入週推播",
-  "weekly_push.cancel": "取消週推播",
-  "weekly_push.reconcile": "對帳週推播",
-  "weekly_push.retry": "重試週推播",
-};
-
-const FIELD_LABELS: Record<string, string> = {
-  className: "班名",
-  coachName: "教練1",
-  coachName2: "教練2",
-  coachCount: "教練人數",
-  coach1IsTeaching: "教練1授課",
-  coach2IsTeaching: "教練2授課",
-  isClassLocked: "鎖定",
-  date: "日期",
-  notes: "備註",
-  name: "名稱",
-  status: "狀態",
-  lineId: "LINE",
-  mapUrl: "地圖",
-  videoUrl: "影片",
-  description: "說明",
-};
+const ACTION_LABELS: Record<string, string> = AUDIT_ACTION_LABELS;
 
 const RUN_STATUS: Record<string, { label: string; color: string }> = {
   failed: { label: "失敗", color: "bg-red-100 text-red-700" },
@@ -203,7 +157,7 @@ function describeChange(before: unknown, after: unknown): string[] {
   return keys
     .filter((k) => JSON.stringify(b[k]) !== JSON.stringify(a[k]))
     .slice(0, 6)
-    .map((k) => `${FIELD_LABELS[k] ?? k}：${show(b[k])} → ${show(a[k])}`);
+    .map((k) => `${AUDIT_FIELD_LABELS[k] ?? k}：${show(b[k])} → ${show(a[k])}`);
 }
 
 // ─── Panels ─────────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { isRealCoachName } from "@shared/scheduleRules";
 import { between, eq, sql } from "drizzle-orm";
-import { db } from "../db";
+// #3: follows the caller's transaction (see shared/dbContext).
+import { txDb as db } from "../shared/dbContext";
 import { coachUsers, schedules, timeSlots, venues } from "@shared/schema";
 import {
   parseScheduleImportText,

@@ -7,7 +7,8 @@
  */
 import { isRealCoachName } from "@shared/scheduleRules";
 import { and, between, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
-import { db } from "../db";
+// #3: follows the caller's transaction (see shared/dbContext).
+import { txDb as db } from "../shared/dbContext";
 import { addDays, format } from "date-fns";
 import {
   schedules,

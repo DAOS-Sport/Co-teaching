@@ -6,6 +6,13 @@ import { spawnSync } from "node:child_process";
 import { logTimestamp } from "./shared/logTimestamp";
 
 process.env.DATABASE_URL = "postgres://unused:unused@127.0.0.1:1/isolated";
+// #3: no real transactions or audit inserts here; audit rows are collected instead.
+const { db } = await import("./db");
+(db as unknown as { transaction: unknown }).transaction = async (fn: (tx: unknown) => unknown) => fn(db);
+const { setAuditWriterForTest } = await import("./shared/audit");
+const auditRows: Array<Record<string, any>> = [];
+const collectAudit = async (entry: Record<string, any>) => { auditRows.push(entry); };
+setAuditWriterForTest(collectAudit as never);
 const { notifyCoachNotFound, coachNotFoundMessage } = await import("./modules/notification/coachNotFound");
 const { probeHttpService } = await import("./shared/serviceHealth");
 const { fetchWithTimeout } = await import("./shared/http/fetchWithTimeout");
@@ -116,6 +123,7 @@ test("#6 schedule writes enforce lock, conflict and availability rules on the se
     getScheduleById: async (id: string) => rows.find(r => r.id === id),
     getSchedulesByDate: async (date: string) => rows.filter(r => r.date === date),
     getTimeSlots: async () => [{ id: "slot-3", order: 3 }],
+    getVenues: async () => [],
     getCoachAvailabilityByWeek: async (weekStart: string) => availability.filter(a => a.weekStart === weekStart),
     updateSchedule: async (id: string, update: object) => fake(id, update),
     assignCoach: async (id: string, coachName: string | null) => fake(id, { coachName }),
@@ -192,6 +200,7 @@ test("#8 schedule writes need the version the editor saw; stale or concurrent sa
     getScheduleById: async (id: string) => (id === row.id ? row : undefined),
     getSchedulesByDate: async () => [row],
     getTimeSlots: async () => [{ id: "slot-3", order: 3 }],
+    getVenues: async () => [],
     getCoachAvailabilityByWeek: async () => [],
     updateSchedule: async (id: string, update: object, expectedVersion?: number) => write(id, update, expectedVersion),
     assignCoach: async (id: string, coachName: string | null, expectedVersion?: number) => write(id, { coachName }, expectedVersion),
@@ -375,4 +384,74 @@ test("IT page data endpoints need the admin password; problem Ragic runs sort fi
   const order = ["success", "partial_failed", "running", "interrupted", "failed"].sort((a, b) => runPriority(a) - runPriority(b));
   assert.deepEqual(order.slice(0, 2).sort(), ["failed", "interrupted"]);
   assert.deepEqual(order.slice(2), ["partial_failed", "running", "success"]);
+});
+
+test("#3 each write leaves one audit row with before/after and no contact details; a failed audit write fails the request", async () => {
+  process.env.REPLIT_DOMAINS ??= "test.invalid";
+  const express = (await import("express")).default;
+  const { registerScheduleRoutes } = await import("./modules/schedule.routes");
+  const { registerCoachAdminRoutes } = await import("./modules/coachAdmin.routes");
+  const { recordAudit } = await import("./shared/audit");
+  const { storage } = await import("./storage");
+  const { env } = await import("./config/env");
+  const row = { id: "row", date: "2099-02-04", venueId: "v1", timeSlotId: "slot-3", className: "A班", coachName: null, coachName2: null, coachCount: 1, coach1IsTeaching: true, coach2IsTeaching: false, isClassLocked: false, notes: null, version: 1 };
+  const coach = { id: "c1", name: "林教練", status: "pending", linkedCoachName: null, lineId: "U-secret-line", phone: "0912-000-111", email: "secret@example.com" };
+  Object.assign(storage, {
+    getScheduleById: async () => row,
+    getSchedulesByDate: async () => [row],
+    getTimeSlots: async () => [{ id: "slot-3", order: 3 }],
+    getVenues: async () => [{ id: "v1", name: "場館一" }],
+    getCoachAvailabilityByWeek: async () => [],
+    updateSchedule: async (_id: string, update: object) => ({ ...row, ...update, version: 2 }),
+    lockSchedules: async () => {},
+    getCoachUserById: async () => coach,
+    getCoachUserByLineId: async () => undefined,
+    updateCoachUserStatus: async (_id: string, status: string) => ({ ...coach, status }),
+    updateCoachUserLineId: async (_id: string, lineId: string) => ({ ...coach, lineId }),
+  });
+  const app = express();
+  app.use(express.json());
+  registerScheduleRoutes(app);
+  registerCoachAdminRoutes(app);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const send = async (method: string, path: string, body: object) =>
+    (await fetch(url + path, { method, headers: { "Content-Type": "application/json", "x-admin-password": env.adminPassword }, body: JSON.stringify(body) })).status;
+  try {
+    auditRows.length = 0;
+    assert.equal(await send("PUT", "/api/schedules/row", { expectedVersion: 1, className: "A班改", coachName: null }), 200);
+    assert.equal(auditRows.length, 1);
+    const [edit] = auditRows;
+    assert.deepEqual([edit.action, edit.entity, edit.entityId, edit.actor], ["schedule.update", "schedule", "row", "共用管理員"]);
+    assert.equal(edit.before.className, "A班");
+    assert.equal(edit.after.className, "A班改");
+    assert.equal(edit.reason, "場館一 2099-02-04 第3節 A班");
+
+    assert.equal(await send("POST", "/api/schedules/lock", { venueId: "v1", startDate: "2099-02-02", endDate: "2099-02-08" }), 200);
+    assert.deepEqual([auditRows[1].action, auditRows[1].entity, auditRows[1].after.venueName], ["schedule.lock", "schedule_week", "場館一"]);
+
+    assert.equal(await send("PUT", "/api/admin/coach-users/c1/status", { status: "approved" }), 200);
+    assert.equal(await send("POST", "/api/admin/set-coach-line-id", { coachUserId: "c1", lineId: "U-new-line" }), 200);
+    const coachRows = auditRows.slice(2);
+    assert.deepEqual(coachRows.map(r => r.action), ["coach.status", "coach.line_bind"]);
+    assert.deepEqual([coachRows[0].before.status, coachRows[0].after.status], ["pending", "approved"]);
+    const recorded = JSON.stringify(coachRows);
+    for (const secret of [coach.lineId, "U-new-line", coach.phone, coach.email]) {
+      assert.ok(!recorded.includes(secret), `audit must not store ${secret}`);
+    }
+
+    // The audit row belongs to the write: if it cannot be saved, neither is the change.
+    setAuditWriterForTest(async () => { throw new Error("audit insert failed"); });
+    assert.equal(await send("PUT", "/api/schedules/row", { expectedVersion: 1, className: "B班", coachName: null }), 500);
+    assert.equal(await send("POST", "/api/schedules", { date: "2099-02-04", venueId: "v1", timeSlotId: "slot-3", className: "C班" }), 500);
+  } finally {
+    setAuditWriterForTest(collectAudit as never);
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+  }
+  await assert.rejects(
+    recordAudit({ actor: "x", action: "schedule.update", entity: "schedule", entityId: "row" }),
+    /inTransaction/,
+  );
 });

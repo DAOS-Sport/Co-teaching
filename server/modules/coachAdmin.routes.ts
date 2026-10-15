@@ -1,6 +1,36 @@
-import type { Express } from "express";
+import type { Express, Request } from "express";
+import type { CoachUser } from "@shared/schema";
+import type { AuditAction } from "@shared/auditActions";
 import { storage } from "../storage";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
+import { inTransaction } from "../shared/dbContext";
+import { ADMIN_ACTOR, coachFields, recordAudit, requestIdOf } from "../shared/audit";
+
+/** #3: a coach-account change and its audit row, committed together. */
+async function auditedCoachWrite(
+  req: Request,
+  action: AuditAction,
+  id: string,
+  write: () => Promise<CoachUser | undefined>,
+): Promise<CoachUser | undefined> {
+  const before = await storage.getCoachUserById(id);
+  return inTransaction(async () => {
+    const saved = await write();
+    if (saved) {
+      await recordAudit({
+        actor: ADMIN_ACTOR,
+        requestId: requestIdOf(req),
+        action,
+        entity: "coach_user",
+        entityId: id,
+        before: coachFields(before),
+        after: coachFields(saved),
+        reason: saved.name,
+      });
+    }
+    return saved;
+  });
+}
 
 export function registerCoachAdminRoutes(app: Express): void {
   // Used by the client password screen to validate the typed password
@@ -41,7 +71,9 @@ export function registerCoachAdminRoutes(app: Express): void {
             .status(400)
             .json({ message: "狀態只能是 approved 或 rejected" });
         }
-        const user = await storage.updateCoachUserStatus(id, status);
+        const user = await auditedCoachWrite(req, "coach.status", id, () =>
+          storage.updateCoachUserStatus(id, status),
+        );
         res.json(user);
       } catch (error) {
         console.error("Error updating coach user status:", error);
@@ -60,7 +92,9 @@ export function registerCoachAdminRoutes(app: Express): void {
         if (!name || typeof name !== "string" || !name.trim()) {
           return res.status(400).json({ message: "姓名不得為空" });
         }
-        const user = await storage.updateCoachUserName(id, name.trim());
+        const user = await auditedCoachWrite(req, "coach.rename", id, () =>
+          storage.updateCoachUserName(id, name.trim()),
+        );
         if (!user) return res.status(404).json({ message: "找不到教練" });
         res.json(user);
       } catch (error) {
@@ -79,7 +113,19 @@ export function registerCoachAdminRoutes(app: Express): void {
         if (typeof content !== "string") {
           return res.status(400).json({ message: "內容格式無效" });
         }
-        await storage.setSetting("coach_rules", content);
+        const previous = await storage.getSetting("coach_rules");
+        await inTransaction(async () => {
+          await storage.setSetting("coach_rules", content);
+          await recordAudit({
+            actor: ADMIN_ACTOR,
+            requestId: requestIdOf(req),
+            action: "coach_rules.update",
+            entity: "coach_rules",
+            entityId: "coach_rules",
+            before: { content: previous ?? null },
+            after: { content },
+          });
+        });
         res.json({ success: true });
       } catch (error) {
         console.error("Error updating coach rules:", error);
@@ -133,14 +179,21 @@ export function registerCoachAdminRoutes(app: Express): void {
       if (!coachUserId || !lineId) {
         return res.status(400).json({ message: "缺少 coachUserId 或 lineId" });
       }
-      const existing = await storage.getCoachUserByLineId(lineId);
-      if (existing && existing.id !== coachUserId) {
-        return res.status(409).json({
-          message: `此 LINE ID 已綁定給「${existing.name}」，請先清除再綁定`,
-        });
+      try {
+        const existing = await storage.getCoachUserByLineId(lineId);
+        if (existing && existing.id !== coachUserId) {
+          return res.status(409).json({
+            message: `此 LINE ID 已綁定給「${existing.name}」，請先清除再綁定`,
+          });
+        }
+        const updated = await auditedCoachWrite(req, "coach.line_bind", coachUserId, () =>
+          storage.updateCoachUserLineId(coachUserId, lineId),
+        );
+        res.json(updated);
+      } catch (error) {
+        console.error("Error binding coach LINE ID:", error);
+        res.status(500).json({ message: "綁定 LINE 失敗" });
       }
-      const updated = await storage.updateCoachUserLineId(coachUserId, lineId);
-      res.json(updated);
     }
   );
 
@@ -148,8 +201,15 @@ export function registerCoachAdminRoutes(app: Express): void {
     "/api/admin/clear-coach-line-id/:id",
     requireAdminPassword,
     async (req, res) => {
-      const updated = await storage.clearCoachUserLineId(req.params.id);
-      res.json(updated);
+      try {
+        const updated = await auditedCoachWrite(req, "coach.line_clear", req.params.id, () =>
+          storage.clearCoachUserLineId(req.params.id),
+        );
+        res.json(updated);
+      } catch (error) {
+        console.error("Error clearing coach LINE ID:", error);
+        res.status(500).json({ message: "解除 LINE 失敗" });
+      }
     }
   );
 }

@@ -1,7 +1,18 @@
-import type { Express } from "express";
+import type { Express, Request } from "express";
 import { format, addDays } from "date-fns";
+import { ZodError } from "zod";
 import { storage } from "../storage";
-import { insertScheduleSchema } from "@shared/schema";
+import { insertScheduleSchema, type Schedule } from "@shared/schema";
+import type { AuditAction } from "@shared/auditActions";
+import { inTransaction } from "../shared/dbContext";
+import {
+  ADMIN_ACTOR,
+  recordAudit,
+  requestIdOf,
+  scheduleContext,
+  scheduleFields,
+  venueNameOf,
+} from "../shared/audit";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
 import { notifyScheduleUnlocked } from "../line-notify";
 import {
@@ -33,6 +44,45 @@ const readExpectedVersion = (value: unknown): number | null => {
   const parsed = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
   return typeof parsed === "number" && Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
 };
+
+/** #3: one schedule write and its audit row, committed together. */
+async function auditedScheduleWrite(
+  req: Request,
+  action: AuditAction,
+  existing: Schedule | null,
+  write: () => Promise<Schedule | null>,
+): Promise<Schedule | null> {
+  const context = await scheduleContext(existing ?? req.body);
+  return inTransaction(async () => {
+    const saved = await write();
+    await recordAudit({
+      actor: ADMIN_ACTOR,
+      requestId: requestIdOf(req),
+      action,
+      entity: "schedule",
+      entityId: saved?.id ?? existing?.id ?? "",
+      before: scheduleFields(existing),
+      after: scheduleFields(saved),
+      reason: context,
+    });
+    return saved;
+  });
+}
+
+/** #3: lock, unlock, copy-week and import touch many rows: one summary row. */
+async function auditedBatch<T>(
+  req: Request,
+  entry: { action: AuditAction; entity: "schedule_week" | "schedule_import"; entityId: string; reason: string },
+  write: () => Promise<T>,
+  summary: (result: T) => Record<string, unknown> | null,
+): Promise<T> {
+  return inTransaction(async () => {
+    const result = await write();
+    const after = summary(result);
+    if (after) await recordAudit({ actor: ADMIN_ACTOR, requestId: requestIdOf(req), ...entry, after });
+    return result;
+  });
+}
 
 export function registerScheduleRoutes(app: Express): void {
   // ── Static `/api/schedules/...` routes FIRST so Express does not match
@@ -70,7 +120,9 @@ export function registerScheduleRoutes(app: Express): void {
         confirmed: req.body?.confirmWarnings,
       });
       if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
-      const schedule = await storage.upsertSchedule(validatedData);
+      const schedule = await auditedScheduleWrite(req, "schedule.create", null, () =>
+        storage.upsertSchedule(validatedData),
+      );
       res.json(schedule);
     } catch (error) {
       if (isPgUniqueViolation(error)) {
@@ -79,9 +131,11 @@ export function registerScheduleRoutes(app: Express): void {
           message: "此時段已經有相同班級，沒有重複新增",
         });
       }
-      res
-        .status(400)
-        .json({ message: error instanceof Error ? error.message : "Unknown error" });
+      if (error instanceof ZodError) {
+        return res.status(400).json({ message: error.message });
+      }
+      console.error("Error creating schedule:", error);
+      res.status(500).json({ message: "Failed to create schedule" });
     }
   });
 
@@ -146,7 +200,13 @@ export function registerScheduleRoutes(app: Express): void {
       try {
         const input = readImportRequest(req.body);
         if (!input.ok) return res.status(400).json({ message: input.message });
-        const result = await commitScheduleImport(input.venueId, input.text, input.mode);
+        const venueName = await venueNameOf(input.venueId);
+        const result = await auditedBatch(
+          req,
+          { action: "schedule.import", entity: "schedule_import", entityId: input.venueId, reason: venueName },
+          () => commitScheduleImport(input.venueId, input.text, input.mode),
+          (done) => (done.committed ? { venueName, created: done.created, updated: done.updated } : null),
+        );
         if (!result.committed) {
           return res.status(409).json({
             message: "資料已變更或仍有錯誤，請重新確認預覽",
@@ -174,13 +234,29 @@ export function registerScheduleRoutes(app: Express): void {
         if (sourceStartDate === targetStartDate) {
           return res.status(400).json({ message: "來源週與目標週不可相同" });
         }
-        const result = await storage.copyWeekIntoEmptyCells({
-          sourceStartDate,
-          sourceEndDate,
-          targetStartDate,
-          venueId,
-          commit: preview !== true,
-        });
+        const copy = () =>
+          storage.copyWeekIntoEmptyCells({
+            sourceStartDate,
+            sourceEndDate,
+            targetStartDate,
+            venueId,
+            commit: preview !== true,
+          });
+        let result: Awaited<ReturnType<typeof copy>>;
+        if (preview === true) {
+          result = await copy();
+        } else {
+          const venueName = await venueNameOf(venueId);
+          result = await auditedBatch(
+            req,
+            { action: "schedule.copy_week", entity: "schedule_week", entityId: venueId, reason: `${venueName} ${sourceStartDate} → ${targetStartDate}` },
+            copy,
+            (done) =>
+              done.plannedCount > 0
+                ? { venueName, sourceWeek: sourceStartDate, targetWeek: targetStartDate, copied: done.plannedCount }
+                : null,
+          );
+        }
         res.json({ success: true, copied: result.committed ? result.plannedCount : 0, ...result });
       } catch (error) {
         console.error("Error copying week:", error);
@@ -203,7 +279,13 @@ export function registerScheduleRoutes(app: Express): void {
             .status(400)
             .json({ message: "Missing venueId, startDate, or endDate" });
         }
-        await storage.lockSchedules(venueId, startDate, endDate);
+        const venueName = await venueNameOf(venueId);
+        await auditedBatch(
+          req,
+          { action: "schedule.lock", entity: "schedule_week", entityId: venueId, reason: `${venueName} ${startDate} ~ ${endDate}` },
+          () => storage.lockSchedules(venueId, startDate, endDate),
+          () => ({ venueName, startDate, endDate, locked: true }),
+        );
         res.json({ success: true });
       } catch (error) {
         res.status(500).json({ message: "Failed to lock schedules" });
@@ -222,7 +304,13 @@ export function registerScheduleRoutes(app: Express): void {
             .status(400)
             .json({ message: "Missing venueId, startDate, or endDate" });
         }
-        await storage.unlockSchedules(venueId, startDate, endDate);
+        const venueName = await venueNameOf(venueId);
+        await auditedBatch(
+          req,
+          { action: "schedule.unlock", entity: "schedule_week", entityId: venueId, reason: `${venueName} ${startDate} ~ ${endDate}` },
+          () => storage.unlockSchedules(venueId, startDate, endDate),
+          () => ({ venueName, startDate, endDate, locked: false }),
+        );
         notifyScheduleUnlocked(venueId, startDate, endDate).catch(() => {});
         res.json({ success: true });
       } catch (error) {
@@ -258,6 +346,8 @@ export function registerScheduleRoutes(app: Express): void {
           confirmed: req.body?.confirmWarnings,
         });
         if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
+        const assign = (write: () => Promise<Schedule | null>) =>
+          auditedScheduleWrite(req, "schedule.assign", existing, write);
 
         if (coachName2 !== undefined) {
           if (coachName2 && existing.coachCount < 2) {
@@ -273,23 +363,23 @@ export function registerScheduleRoutes(app: Express): void {
             coach2IsTeaching: !!existing.coach2IsTeaching,
           });
           if (promoted) Object.assign(updateData, promoted);
-          const schedule = await storage.updateSchedule(
+          const schedule = await assign(() => storage.updateSchedule(
             req.params.id,
             updateData,
             expectedVersion
-          );
+          ));
           return res.json(schedule);
         }
         if (coach1IsTeaching !== undefined) {
-          const schedule = await storage.updateSchedule(req.params.id, {
+          const schedule = await assign(() => storage.updateSchedule(req.params.id, {
             coach1IsTeaching: !!coach1IsTeaching,
-          }, expectedVersion);
+          }, expectedVersion));
           return res.json(schedule);
         }
         if (coach2IsTeaching !== undefined) {
-          const schedule = await storage.updateSchedule(req.params.id, {
+          const schedule = await assign(() => storage.updateSchedule(req.params.id, {
             coach2IsTeaching: !!coach2IsTeaching,
-          }, expectedVersion);
+          }, expectedVersion));
           return res.json(schedule);
         }
         // Clearing slot 1 must not strand a coach in slot 2 — promote them.
@@ -299,9 +389,11 @@ export function registerScheduleRoutes(app: Express): void {
           coach1IsTeaching: !!existing.coach1IsTeaching,
           coach2IsTeaching: !!existing.coach2IsTeaching,
         });
-        const schedule = promoted
-          ? await storage.updateSchedule(req.params.id, promoted, expectedVersion)
-          : await storage.assignCoach(req.params.id, coachName || null, expectedVersion);
+        const schedule = await assign(() =>
+          promoted
+            ? storage.updateSchedule(req.params.id, promoted, expectedVersion)
+            : storage.assignCoach(req.params.id, coachName || null, expectedVersion),
+        );
         res.json(schedule);
       } catch (error) {
         if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);
@@ -346,7 +438,9 @@ export function registerScheduleRoutes(app: Express): void {
           coach2IsTeaching: !!existing.coach2IsTeaching,
         });
         if (promoted) Object.assign(updateData, promoted);
-        const schedule = await storage.updateSchedule(req.params.id, updateData, expectedVersion);
+        const schedule = await auditedScheduleWrite(req, "schedule.update", existing, () =>
+          storage.updateSchedule(req.params.id, updateData, expectedVersion),
+        );
         res.json(schedule);
       } catch (error) {
         if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);
@@ -422,10 +516,8 @@ export function registerScheduleRoutes(app: Express): void {
           coach2IsTeaching: updateData.coach2IsTeaching ?? !!existing.coach2IsTeaching,
         });
         if (promoted) Object.assign(updateData, promoted);
-        const schedule = await storage.updateSchedule(
-          req.params.id,
-          updateData,
-          expectedVersion
+        const schedule = await auditedScheduleWrite(req, "schedule.patch", existing, () =>
+          storage.updateSchedule(req.params.id, updateData, expectedVersion),
         );
         res.json(schedule);
       } catch (error) {
@@ -453,7 +545,10 @@ export function registerScheduleRoutes(app: Express): void {
             .status(409)
             .json({ code: "SCHEDULE_LOCKED", message: "課表已鎖定，請先解鎖該週才能刪除" });
         }
-        await storage.deleteSchedule(req.params.id, expectedVersion);
+        await auditedScheduleWrite(req, "schedule.delete", existing, async () => {
+          await storage.deleteSchedule(req.params.id, expectedVersion);
+          return null;
+        });
         res.json({ success: true });
       } catch (error) {
         if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);

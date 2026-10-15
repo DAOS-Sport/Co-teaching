@@ -22,6 +22,12 @@ import { renderXlsx } from "./weeklyPush.report";
 import { featureFlags } from "../../config/featureFlags";
 import { areWeeklyPushWorkersReady } from "./weeklyPush.worker";
 import { reconcileWeeklyPushRun } from "./weeklyPush.reconcile";
+import type { AuditAction } from "@shared/auditActions";
+import { ADMIN_ACTOR, recordTriggerAudit, requestIdOf } from "../../shared/audit";
+
+/** #3: queued pushes run on their own workers; record the trigger and its result. */
+const triggered = (req: Request, action: AuditAction, runId: string, after: Record<string, unknown>) =>
+  recordTriggerAudit({ actor: ADMIN_ACTOR, requestId: requestIdOf(req), action, entity: "weekly_push", entityId: runId, after });
 
 const enqueueBodySchema = z.object({
   weekStartDate: z
@@ -76,6 +82,13 @@ export function registerWeeklyPushRoutes(app: Express): void {
           dryRun: dryRun === true,
           triggerSource: "manual",
         });
+        if (dryRun !== true) {
+          await triggered(req, "weekly_push.enqueue", result.run.id, {
+            runId: result.run.id,
+            recipients: result.recipientsCreated,
+            result: result.reused ? "沿用既有批次" : "已排入",
+          });
+        }
         return res.json({
           runId: result.run.id,
           reused: result.reused,
@@ -109,6 +122,7 @@ export function registerWeeklyPushRoutes(app: Express): void {
       try {
         const run = await reconcileWeeklyPushRun(req.params.runId);
         if (!run) return res.status(404).json({ message: "找不到週推播紀錄" });
+        await triggered(req, "weekly_push.reconcile", req.params.runId, { runId: req.params.runId, result: run.status });
         return res.json({ run });
       } catch (err) {
         return res.status(500).json({ message: err instanceof Error ? err.message : String(err) });
@@ -130,6 +144,7 @@ export function registerWeeklyPushRoutes(app: Express): void {
         status: "cancelled",
         completedAt: new Date(),
       });
+      await triggered(req, "weekly_push.cancel", run.id, { runId: run.id, recipients: cancelledRecipients });
       return res.json({ run: updated, cancelledRecipients });
     },
   );
@@ -222,6 +237,7 @@ export function registerWeeklyPushRoutes(app: Express): void {
       const { runId } = req.params;
       try {
         const result = await retryFailedRecipients(runId);
+        await triggered(req, "weekly_push.retry", runId, { runId: result.run.id, recipients: result.recipientsCreated });
         return res.json({
           newRunId: result.run.id,
           recipientsCreated: result.recipientsCreated,
