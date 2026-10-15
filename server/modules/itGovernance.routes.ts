@@ -3,11 +3,65 @@ import { requireAdminPassword } from "../shared/auth/adminPassword";
 import { getRagicSyncStatus } from "../ragic";
 import { featureFlags } from "../config/featureFlags";
 import { env } from "../config/env";
-import { probeHttpService } from "../shared/serviceHealth";
+import { probeHttpService, type ServiceHealth } from "../shared/serviceHealth";
+import { max, sql } from "drizzle-orm";
+import { coachPortalSessions } from "@shared/schema";
+import { db } from "../db";
+import { getAvailableSchools, schoolSchemaName } from "../multi-school-db";
+
+const LOGIN_EVIDENCE_DAYS = 30;
+
+/** LINE login works if a coach completed it recently (every portal session starts with one). */
+export function lineLoginHealth(input: { configured: boolean; lastLoginAt: Date | null; now?: Date }): ServiceHealth {
+  const now = input.now ?? new Date();
+  const checkedAt = now.toISOString();
+  if (!input.configured) return { status: "misconfigured", checkedAt, code: "missing_configuration" };
+  if (!input.lastLoginAt) return { status: "unknown", checkedAt, code: "no_login_yet" };
+  const days = (now.getTime() - input.lastLoginAt.getTime()) / 86_400_000;
+  return days <= LOGIN_EVIDENCE_DAYS
+    ? { status: "ok", checkedAt, code: "recent_login" }
+    : { status: "unknown", checkedAt, code: `no_login_in_${LOGIN_EVIDENCE_DAYS}_days` };
+}
+
+/** Every registered school needs its schema (created at startup). */
+export function schoolModuleHealth(input: { enabled: boolean; schemas: { code: string; ready: boolean }[]; now?: Date }): ServiceHealth {
+  const checkedAt = (input.now ?? new Date()).toISOString();
+  if (!input.enabled) return { status: "disabled", checkedAt, code: "disabled" };
+  const missing = input.schemas.filter((s) => !s.ready).map((s) => s.code);
+  return missing.length
+    ? { status: "error", checkedAt, code: `missing_schema:${missing.join(",")}` }
+    : { status: "ok", checkedAt, code: `${input.schemas.length}_schools_ready` };
+}
+
+async function lastCoachLogin(): Promise<Date | null> {
+  const [row] = await db.select({ last: max(coachPortalSessions.createdAt) }).from(coachPortalSessions);
+  return row?.last ?? null;
+}
+
+async function schoolSchemas(): Promise<{ code: string; ready: boolean }[]> {
+  return Promise.all(
+    getAvailableSchools().map(async (code) => {
+      const { rows } = await db.execute(sql`select to_regclass(${`${schoolSchemaName(code)}.schedules`}) is not null as ready`);
+      return { code, ready: rows[0]?.ready === true };
+    }),
+  );
+}
+
+const taipeiTime = (at: Date) =>
+  at.toLocaleString("zh-TW", { timeZone: "Asia/Taipei", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 
 export function registerItGovernanceRoutes(app: Express): void {
   app.get("/api/admin/it-governance", requireAdminPassword, async (_req, res) => {
     const ragic = getRagicSyncStatus();
+    const lineLoginConfigured = !!(env.lineChannelId && env.lineChannelSecret);
+    const [lastLoginAt, schoolHealth] = await Promise.all([
+      lastCoachLogin().catch(() => null),
+      featureFlags.enableSchoolModule
+        ? schoolSchemas()
+            .then((schemas) => schoolModuleHealth({ enabled: true, schemas }))
+            .catch((): ServiceHealth => ({ status: "error", checkedAt: new Date().toISOString(), code: "query_failed" }))
+        : Promise.resolve(schoolModuleHealth({ enabled: false, schemas: [] })),
+    ]);
     const [lineHealth, ragicHealth] = await Promise.all([
       probeHttpService({ enabled: featureFlags.enableLineNotify, configured: !!env.lineChannelAccessToken,
         kind: "line", url: "https://api.line.me/v2/bot/info", headers: { Authorization: `Bearer ${env.lineChannelAccessToken}` } }),
@@ -63,10 +117,10 @@ export function registerItGovernanceRoutes(app: Express): void {
       {
         id: "line-auth",
         name: "LINE 登入 (Coach Portal)",
-        description: "教練前台透過 LINE OAuth 登入，取得 30 天 session token",
+        description: `教練前台透過 LINE OAuth 登入，取得 30 天 session token。${lastLoginAt ? `最近一次教練登入：${taipeiTime(lastLoginAt)}` : "尚無教練登入紀錄"}`,
         enabled: true,
-        configured: !!(env.lineChannelId && env.lineChannelSecret),
-        status: env.lineChannelId && env.lineChannelSecret ? "unknown" : "misconfigured",
+        configured: lineLoginConfigured,
+        ...lineLoginHealth({ configured: lineLoginConfigured, lastLoginAt }),
         endpoints: [
           "GET /api/auth/line",
           "GET /api/auth/line/callback",
@@ -79,7 +133,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         description: "支援多個學校獨立 schema，教師回饋與課表管理",
         enabled: featureFlags.enableSchoolModule,
         configured: featureFlags.enableSchoolModule,
-        status: featureFlags.enableSchoolModule ? "unknown" : "disabled",
+        ...schoolHealth,
         endpoints: [
           "GET /api/:schoolCode/schedules",
           "GET /api/:schoolCode/teachers",

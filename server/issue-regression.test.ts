@@ -310,7 +310,7 @@ test("#1 Ragic sync keeps failed items, refuses to merge same-name rows and repo
     assert.equal(runs.at(-1)!.trigger, "manual");
     assert.equal(outcome.status, "partial_failed");
     assert.deepEqual(outcome.failures.map((f) => `${f.code}:${f.sourceId}`).sort(),
-      ["DUPLICATE_NAME_IN_RAGIC:12", "DUPLICATE_NAME_IN_RAGIC:13", "LINE_ID_TAKEN:14"]);
+      ["DUPLICATE_NAME_IN_RAGIC:12", "DUPLICATE_NAME_IN_RAGIC:13"]);
     assert.ok(ragic.getRagicSyncStatus().lastError, "a partial run must not look like a clean success");
 
     // Another instance already holds the sync lock: this one starts no run.
@@ -454,4 +454,50 @@ test("#3 each write leaves one audit row with before/after and no contact detail
     recordAudit({ actor: "x", action: "schedule.update", entity: "schedule", entityId: "row" }),
     /inTransaction/,
   );
+});
+
+test("IT page: a LINE ID owned by another account is not a Ragic failure; LINE login and schools are actually checked", async () => {
+  process.env.RAGIC_API_KEY ??= "test-key";
+  const ragic = await import("./ragic");
+  const { storage } = await import("./storage");
+  const { lineLoginHealth, schoolModuleHealth } = await import("./modules/itGovernance.routes");
+  const LINE = "U" + "fedcba9876543210".repeat(2);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    const body = String(url).includes("general-information/23")
+      ? { "31": { _ragicId: 31, 姓名: "已有帳號", 應徵職務: "教練" } }
+      : String(url).includes("ragicforms4/20004")
+        ? { "41": { _ragicId: 41, 姓名: "已有帳號", "個人LINE ID": LINE } }
+        : {};
+    return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+  }) as typeof fetch;
+  Object.assign(storage, {
+    getVenues: async () => [],
+    getAllVenueInfos: async () => [],
+    getAllCoachUsers: async () => [
+      { id: "owner", name: "別人", status: "approved", lineId: LINE, employeeId: null, createdAt: new Date(0) },
+      { id: "me", name: "已有帳號", status: "approved", lineId: null, employeeId: null, createdAt: new Date(0) },
+    ],
+    updateCoachUserLineId: async () => { throw new Error("must not rebind a LINE ID owned by someone else"); },
+  });
+  const outcomes: { status: string; failures: unknown[] }[] = [];
+  ragic.setRagicRunStoreForTest({ start: async () => "run", finish: async (_id, outcome) => { outcomes.push(outcome); } });
+  ragic.setRagicSyncLockForTest(async () => ({ release: async () => {} }));
+  try {
+    await ragic.syncRagicAll("manual");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepEqual([outcomes.at(-1)!.status, outcomes.at(-1)!.failures.length], ["success", 0]);
+  assert.equal(ragic.getRagicSyncStatus().lastError, null, "the Ragic chip must not turn red for this");
+
+  const now = new Date("2026-10-15T00:00:00Z");
+  assert.equal(lineLoginHealth({ configured: false, lastLoginAt: null, now }).status, "misconfigured");
+  assert.equal(lineLoginHealth({ configured: true, lastLoginAt: null, now }).status, "unknown");
+  assert.equal(lineLoginHealth({ configured: true, lastLoginAt: new Date("2026-10-14T13:00:00Z"), now }).status, "ok");
+  assert.equal(lineLoginHealth({ configured: true, lastLoginAt: new Date("2026-08-01T00:00:00Z"), now }).status, "unknown");
+  assert.equal(schoolModuleHealth({ enabled: true, schemas: [{ code: "demo", ready: true }, { code: "school1", ready: true }], now }).status, "ok");
+  const broken = schoolModuleHealth({ enabled: true, schemas: [{ code: "demo", ready: true }, { code: "school1", ready: false }], now });
+  assert.deepEqual([broken.status, broken.code], ["error", "missing_schema:school1"]);
+  assert.equal(schoolModuleHealth({ enabled: false, schemas: [], now }).status, "disabled");
 });

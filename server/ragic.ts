@@ -349,8 +349,8 @@ async function syncCoaches(failures: SyncFailure[]): Promise<SyncResult["coaches
       // row — that is the unique violation the old sync kept logging.
       const owner = lineId ? byLineId.get(lineId) : undefined;
       if (owner) {
+        // Expected (10/15 user decision): not a sync failure.
         console.warn(`[Ragic] "${coach.name}": LINE ID already bound to "${owner.name}" — creating without it`);
-        fail(coach, "LINE_ID_TAKEN", "的 LINE ID 已綁在其他帳號，建立帳號時未綁定");
       }
       try {
         const created = await storage.createCoachUser({
@@ -386,8 +386,8 @@ async function syncCoaches(failures: SyncFailure[]): Promise<SyncResult["coaches
     if (lineId && !current.lineId) {
       const owner = byLineId.get(lineId);
       if (owner && owner.id !== current.id) {
+        // Expected (10/15 user decision): not a sync failure.
         console.warn(`[Ragic] "${coach.name}": LINE ID already bound to "${owner.name}" — not re-binding`);
-        fail(coach, "LINE_ID_TAKEN", "的 LINE ID 已綁在其他帳號，未綁定");
       } else {
         try {
           const updatedUser = await storage.updateCoachUserLineId(current.id, lineId);
@@ -400,7 +400,6 @@ async function syncCoaches(failures: SyncFailure[]): Promise<SyncResult["coaches
         } catch (err) {
           if (isUniqueViolation(err)) {
             console.warn(`[Ragic] skipped LINE ID for "${coach.name}": taken by another account`);
-            fail(coach, "LINE_ID_TAKEN", "的 LINE ID 已綁在其他帳號，未綁定");
           } else {
             console.error(`[Ragic] failed to sync LINE ID for "${coach.name}":`, errMessage(err));
             fail(coach, "LINE_ID_UPDATE_FAILED", "的 LINE ID 寫入失敗");
