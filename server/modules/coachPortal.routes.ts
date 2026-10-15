@@ -15,8 +15,8 @@ import { ADMIN_ACTOR, coachActor, coachFields, recordAudit, requestIdOf } from "
 
 /** #3: the coach binds their own LINE to an existing account. */
 async function auditedLineLink(req: Request, coachUserId: string, lineId: string) {
-  const before = await storage.getCoachUserById(coachUserId);
   return inTransaction(async () => {
+    const before = await storage.getCoachUserById(coachUserId);
     const updated = await storage.updateCoachUserLineId(coachUserId, lineId);
     if (updated) {
       await recordAudit({
@@ -351,8 +351,8 @@ export function registerCoachPortalRoutes(app: Express): void {
             .json({ message: "dayOfWeek must be 1-7, timeSlotOrder must be 1-7" });
         }
       }
-      const previousSlots = (await storage.getCoachAvailabilityForCoach(coachName, weekStart)).length;
       await inTransaction(async () => {
+        const previousSlots = (await storage.getCoachAvailabilityForCoach(coachName, weekStart)).length;
         await storage.upsertCoachAvailability(
           coachName,
           weekStart,

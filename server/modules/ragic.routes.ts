@@ -28,8 +28,18 @@ export function registerRagicRoutes(app: Express): void {
           after: { result },
         });
       try {
+        const previousSync = getRagicSyncStatus().lastSyncTime;
         const result = await syncRagicAll();
-        await audit(getRagicSyncStatus().lastError ? "有失敗（見 Ragic 同步紀錄）" : "完成");
+        const status = getRagicSyncStatus();
+        // A sync already running here or on another instance returns the
+        // previous result without running; say so instead of reusing it.
+        await audit(
+          status.lastSyncTime === previousSync
+            ? "另一個同步進行中，本次跳過"
+            : status.lastError
+              ? "有失敗（見 Ragic 同步紀錄）"
+              : "完成",
+        );
         res.json({ success: true, ...result });
       } catch (error) {
         console.error("Manual Ragic sync error:", error);

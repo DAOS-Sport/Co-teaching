@@ -13,8 +13,8 @@ async function auditedCoachWrite(
   id: string,
   write: () => Promise<CoachUser | undefined>,
 ): Promise<CoachUser | undefined> {
-  const before = await storage.getCoachUserById(id);
   return inTransaction(async () => {
+    const before = await storage.getCoachUserById(id);
     const saved = await write();
     if (saved) {
       await recordAudit({
@@ -113,8 +113,8 @@ export function registerCoachAdminRoutes(app: Express): void {
         if (typeof content !== "string") {
           return res.status(400).json({ message: "內容格式無效" });
         }
-        const previous = await storage.getSetting("coach_rules");
         await inTransaction(async () => {
+          const previous = await storage.getSetting("coach_rules");
           await storage.setSetting("coach_rules", content);
           await recordAudit({
             actor: ADMIN_ACTOR,

@@ -47,8 +47,8 @@ export function registerVenueRoutes(app: Express): void {
   app.delete("/api/admin/venues/:id", requireAdminPassword, async (req, res) => {
     try {
       // Deleting a venue also deletes its schedules (venue repository).
-      const venue = (await storage.getVenues()).find((v) => v.id === req.params.id);
       await inTransaction(async () => {
+        const venue = (await storage.getVenues()).find((v) => v.id === req.params.id);
         await storage.deleteVenue(req.params.id);
         await recordAudit({
           actor: ADMIN_ACTOR,
@@ -86,8 +86,8 @@ export function registerVenueRoutes(app: Express): void {
         const { venueName } = req.params;
         const { videoUrl, description, mapUrl } = req.body;
         const name = decodeURIComponent(venueName);
-        const previous = (await storage.getAllVenueInfos()).find((i) => i.venueName === name);
         const info = await inTransaction(async () => {
+          const previous = (await storage.getAllVenueInfos()).find((i) => i.venueName === name);
           const saved = await storage.upsertVenueInfo(
             name,
             videoUrl || null,
