@@ -33,7 +33,7 @@ export function registerItGovernanceRoutes(app: Express): void {
       {
         id: "ragic-sync",
         name: "Ragic 資料同步",
-        description: "每日 03:00 自動從 Ragic 同步部門、教練姓名、LINE ID 及員工編號",
+        description: "每日 03:00（台北）由 Replit 排程部署觸發，從 Ragic 同步部門、教練姓名、LINE ID 及員工編號；伺服器啟動時也會同步一次",
         enabled: featureFlags.enableRagicSync,
         configured: !!env.ragicApiKey,
         ...ragicHealth,
@@ -43,6 +43,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         endpoints: [
           "GET /api/admin/ragic-status",
           "POST /api/admin/ragic-sync",
+          "POST /api/internal/ragic-sync",
         ],
       },
       {
@@ -178,6 +179,7 @@ export function registerItGovernanceRoutes(app: Express): void {
         endpoints: [
           { method: "GET", path: "/api/admin/ragic-status", description: "上次同步時間與結果", auth: "admin" },
           { method: "POST", path: "/api/admin/ragic-sync", description: "手動觸發完整 Ragic 同步", auth: "admin" },
+          { method: "POST", path: "/api/internal/ragic-sync", description: "每日排程同步（Replit 排程部署呼叫）", auth: "cron-token" },
         ],
       },
       {
