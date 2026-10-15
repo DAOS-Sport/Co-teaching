@@ -108,7 +108,6 @@ const AUTH_LABELS: Record<string, { label: string; color: string }> = {
   admin: { label: "管理員", color: "bg-purple-100 text-purple-700" },
   "coach-token": { label: "教練Token", color: "bg-teal-100 text-teal-700" },
   replit: { label: "Replit Auth", color: "bg-indigo-100 text-indigo-700" },
-  "cron-token": { label: "排程金鑰", color: "bg-amber-100 text-amber-700" },
 };
 
 const SERVICE_STATUS: Record<ServiceStatus["status"], { label: string; icon: string; color: string; rank: number }> = {
