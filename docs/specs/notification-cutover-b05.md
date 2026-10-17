@@ -1,5 +1,11 @@
 # B05: explicit notification runtime
 
+The user selected **keep the current URL and Autoscale, design an external
+wakeup** on 2026-10-17. The always-on entry below remains a tested opt-in option,
+not the selected deployment solution. See
+[B05-EW1 external-wakeup SPEC](notification-external-wake-b05.md). Its bounded
+execution, identity trust and activation acceptance are not implemented yet.
+
 Normal `npm run dev` and `npm start` remain web-only. They do not start workers,
 cron, schema repair, seeds or data cleanup. `server/notification-app.ts` is a
 separate, deliberate operational entry; importing the HTTP application does not
