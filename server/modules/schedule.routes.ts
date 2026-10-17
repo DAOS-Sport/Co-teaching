@@ -1,10 +1,13 @@
 import type { Express, Request } from "express";
+import { createSchedulingUseCases } from "../infrastructure/scheduling/composition";
+import { presentScheduleMutationError } from "../adapters/presenters/schedule-error";
+import { requireScheduleVersion } from "../core/scheduling/policies";
 import { format, addDays } from "date-fns";
 import { ZodError } from "zod";
 import { storage } from "../storage";
 import { insertScheduleSchema, type Schedule } from "@shared/schema";
 import type { AuditAction } from "@shared/auditActions";
-import { inTransaction } from "../shared/dbContext";
+import { inScheduleTransaction } from "../infrastructure/scheduling/transaction";
 import {
   ADMIN_ACTOR,
   recordAudit,
@@ -14,7 +17,8 @@ import {
   venueNameOf,
 } from "../shared/audit";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
-import { notifyScheduleUnlocked } from "../line-notify";
+import { enqueueScheduleUnlocked } from "../line-notify";
+import { randomUUID } from "node:crypto";
 import {
   commitScheduleImport,
   previewScheduleImport,
@@ -45,6 +49,16 @@ const readExpectedVersion = (value: unknown): number | null => {
   return typeof parsed === "number" && Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
 };
 
+/** Common application policy; input parsing and HTTP error mapping stay here. */
+async function mutateSchedule(req: Request, action: AuditAction, patch: ScheduleUpdate, assign = false) {
+  const auditContext = { actor: ADMIN_ACTOR, requestId: requestIdOf(req) ?? null };
+  const useCases = createSchedulingUseCases({ ...auditContext, action });
+  const input = { scheduleId: req.params.id, expectedVersion: readExpectedVersion(req.body?.expectedVersion),
+    patch, confirmWarnings: req.body?.confirmWarnings, confirmationToken: req.body?.confirmationToken,
+    auditContext };
+  return assign ? useCases.assignCoach(input) : useCases.updateSchedule(input);
+}
+
 /** #3: one schedule write and its audit row, committed together. */
 async function auditedScheduleWrite(
   req: Request,
@@ -53,7 +67,7 @@ async function auditedScheduleWrite(
   write: () => Promise<Schedule | null>,
 ): Promise<Schedule | null> {
   const context = await scheduleContext(existing ?? req.body);
-  return inTransaction(async () => {
+  return inScheduleTransaction(async () => {
     const saved = await write();
     await recordAudit({
       actor: ADMIN_ACTOR,
@@ -76,7 +90,7 @@ async function auditedBatch<T>(
   write: () => Promise<T>,
   summary: (result: T) => Record<string, unknown> | null,
 ): Promise<T> {
-  return inTransaction(async () => {
+  return inScheduleTransaction(async () => {
     const result = await write();
     const after = summary(result);
     if (after) await recordAudit({ actor: ADMIN_ACTOR, requestId: requestIdOf(req), ...entry, after });
@@ -104,27 +118,15 @@ export function registerScheduleRoutes(app: Express): void {
   app.post("/api/schedules", requireAdminPassword, async (req, res) => {
     try {
       const validatedData = insertScheduleSchema.parse(req.body);
-      if (isDuplicateCoach(validatedData.coachName, validatedData.coachName2)) {
-        return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
-      }
-      if (await isVenueDateLocked(validatedData.venueId, validatedData.date)) {
-        return res.status(409).json(SCHEDULE_LOCKED);
-      }
-      const pending = await pendingAssignmentWarnings({
-        scheduleId: null,
-        venueId: validatedData.venueId,
-        date: validatedData.date,
-        timeSlotId: validatedData.timeSlotId,
-        before: null,
-        after: validatedData,
-        confirmed: req.body?.confirmWarnings,
+      const auditContext = { actor: ADMIN_ACTOR, requestId: requestIdOf(req) ?? null };
+      const schedule = await createSchedulingUseCases({ ...auditContext, action: "schedule.create" }).createSchedule({
+        values: validatedData, confirmWarnings: req.body?.confirmWarnings,
+        confirmationToken: req.body?.confirmationToken, auditContext,
       });
-      if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
-      const schedule = await auditedScheduleWrite(req, "schedule.create", null, () =>
-        storage.upsertSchedule(validatedData),
-      );
       res.json(schedule);
     } catch (error) {
+      const presented = presentScheduleMutationError(error);
+      if (presented) return res.status(presented.status).json(presented.body);
       if (isPgUniqueViolation(error)) {
         return res.status(409).json({
           code: "DUPLICATE_CLASS_IN_CELL",
@@ -204,11 +206,12 @@ export function registerScheduleRoutes(app: Express): void {
         const result = await auditedBatch(
           req,
           { action: "schedule.import", entity: "schedule_import", entityId: input.venueId, reason: venueName },
-          () => commitScheduleImport(input.venueId, input.text, input.mode),
+          () => commitScheduleImport(input.venueId, input.text, input.mode, req.body?.confirmationToken),
           (done) => (done.committed ? { venueName, created: done.created, updated: done.updated } : null),
         );
         if (!result.committed) {
           return res.status(409).json({
+            code: result.code,
             message: "資料已變更或仍有錯誤，請重新確認預覽",
             preview: result.preview,
           });
@@ -241,6 +244,7 @@ export function registerScheduleRoutes(app: Express): void {
             targetStartDate,
             venueId,
             commit: preview !== true,
+            confirmationToken: req.body?.confirmationToken,
           });
         let result: Awaited<ReturnType<typeof copy>>;
         if (preview === true) {
@@ -252,13 +256,19 @@ export function registerScheduleRoutes(app: Express): void {
             { action: "schedule.copy_week", entity: "schedule_week", entityId: venueId, reason: `${venueName} ${sourceStartDate} → ${targetStartDate}` },
             copy,
             (done) =>
-              done.plannedCount > 0
+              done.committed && done.plannedCount > 0
                 ? { venueName, sourceWeek: sourceStartDate, targetWeek: targetStartDate, copied: done.plannedCount }
                 : null,
           );
         }
+        if (preview !== true && !result.committed) return res.status(409).json({
+          message: "資料已變更或尚未完成預覽，請確認新的複製預覽。", preview: result, ...result,
+        });
         res.json({ success: true, copied: result.committed ? result.plannedCount : 0, ...result });
       } catch (error) {
+        if (error instanceof Error && ["INVALID_COPY_RANGE", "OVERLAPPING_COPY_RANGE"].includes(error.message)) {
+          return res.status(400).json({ code: error.message, message: "來源限一至七日，且不能與目標週重疊。" });
+        }
         console.error("Error copying week:", error);
         if (isPgUniqueViolation(error)) {
           return res.status(409).json({ message: "目標週資料已被其他使用者修改，請重新預覽" });
@@ -305,14 +315,21 @@ export function registerScheduleRoutes(app: Express): void {
             .json({ message: "Missing venueId, startDate, or endDate" });
         }
         const venueName = await venueNameOf(venueId);
-        await auditedBatch(
+        const operationId = typeof req.body.operationId === "string" ? req.body.operationId : requestIdOf(req) ?? randomUUID();
+        if (!/^[A-Za-z0-9:_-]{1,128}$/.test(operationId)) return res.status(400).json({ message: "Invalid operationId" });
+        const notification = await auditedBatch(
           req,
           { action: "schedule.unlock", entity: "schedule_week", entityId: venueId, reason: `${venueName} ${startDate} ~ ${endDate}` },
-          () => storage.unlockSchedules(venueId, startDate, endDate),
-          () => ({ venueName, startDate, endDate, locked: false }),
+          async () => {
+            const before = await storage.getSchedulesByDateRange(startDate, endDate);
+            const changed = before.some(row => row.venueId === venueId && row.isClassLocked);
+            if (!changed) return { status: "unchanged" as const, notificationIds: [] };
+            await storage.unlockSchedules(venueId, startDate, endDate);
+            return enqueueScheduleUnlocked(venueId, startDate, endDate, operationId);
+          },
+          done => done.status === "unchanged" ? null : { venueName, startDate, endDate, locked: false, notification: done.status },
         );
-        notifyScheduleUnlocked(venueId, startDate, endDate).catch(() => {});
-        res.json({ success: true });
+        res.json({ success: true, notification });
       } catch (error) {
         res.status(500).json({ message: "Failed to unlock schedules" });
       }
@@ -324,78 +341,25 @@ export function registerScheduleRoutes(app: Express): void {
     requireAdminPassword,
     async (req, res) => {
       try {
-        const { coachName, coachName2, coach1IsTeaching, coach2IsTeaching } =
-          req.body;
+        const { coachName, coachName2, coach1IsTeaching, coach2IsTeaching } = req.body;
         const existing = await storage.getScheduleById(req.params.id);
+        requireScheduleVersion(existing, readExpectedVersion(req.body?.expectedVersion));
         if (!existing) return res.status(404).json({ message: "Schedule not found" });
-        const expectedVersion = readExpectedVersion(req.body?.expectedVersion);
-        if (expectedVersion === null) return res.status(428).json(VERSION_REQUIRED);
-        if (existing.version !== expectedVersion) return res.status(409).json(VERSION_CONFLICT);
-        const nextCoach1 = coachName !== undefined ? coachName : existing.coachName;
-        const nextCoach2 = coachName2 !== undefined ? coachName2 : existing.coachName2;
-        if (isDuplicateCoach(nextCoach1, nextCoach2)) {
-          return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
-        }
-        const pending = await pendingAssignmentWarnings({
-          scheduleId: existing.id,
-          venueId: existing.venueId,
-          date: existing.date,
-          timeSlotId: existing.timeSlotId,
-          before: existing,
-          after: { coachName: nextCoach1, coachName2: nextCoach2 },
-          confirmed: req.body?.confirmWarnings,
-        });
-        if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
-        const assign = (write: () => Promise<Schedule | null>) =>
-          auditedScheduleWrite(req, "schedule.assign", existing, write);
-
+        let patch: ScheduleUpdate;
         if (coachName2 !== undefined) {
-          if (coachName2 && existing.coachCount < 2) {
-            return res.status(400).json({ message: "請先將教練人數設為 2" });
-          }
-          const updateData: ScheduleUpdate = { coachName2: coachName2 || null };
-          if (!coachName2) updateData.coach2IsTeaching = false;
-          // Slot 2 filled while slot 1 is empty → that coach moves up to slot 1.
-          const promoted = promoteCoachSlots({
-            coachName: existing.coachName,
-            coachName2: coachName2 || null,
-            coach1IsTeaching: !!existing.coach1IsTeaching,
-            coach2IsTeaching: !!existing.coach2IsTeaching,
-          });
-          if (promoted) Object.assign(updateData, promoted);
-          const schedule = await assign(() => storage.updateSchedule(
-            req.params.id,
-            updateData,
-            expectedVersion
-          ));
-          return res.json(schedule);
+          if (coachName2 && existing.coachCount < 2) return res.status(400).json({ message: "請先將教練人數設為 2" });
+          patch = { coachName2: coachName2 || null, ...(!coachName2 ? { coach2IsTeaching: false } : {}) };
+        } else if (coach1IsTeaching !== undefined) {
+          patch = { coach1IsTeaching: !!coach1IsTeaching };
+        } else if (coach2IsTeaching !== undefined) {
+          patch = { coach2IsTeaching: !!coach2IsTeaching };
+        } else {
+          patch = { coachName: coachName || null };
         }
-        if (coach1IsTeaching !== undefined) {
-          const schedule = await assign(() => storage.updateSchedule(req.params.id, {
-            coach1IsTeaching: !!coach1IsTeaching,
-          }, expectedVersion));
-          return res.json(schedule);
-        }
-        if (coach2IsTeaching !== undefined) {
-          const schedule = await assign(() => storage.updateSchedule(req.params.id, {
-            coach2IsTeaching: !!coach2IsTeaching,
-          }, expectedVersion));
-          return res.json(schedule);
-        }
-        // Clearing slot 1 must not strand a coach in slot 2 — promote them.
-        const promoted = promoteCoachSlots({
-          coachName: coachName || null,
-          coachName2: existing.coachName2,
-          coach1IsTeaching: !!existing.coach1IsTeaching,
-          coach2IsTeaching: !!existing.coach2IsTeaching,
-        });
-        const schedule = await assign(() =>
-          promoted
-            ? storage.updateSchedule(req.params.id, promoted, expectedVersion)
-            : storage.assignCoach(req.params.id, coachName || null, expectedVersion),
-        );
-        res.json(schedule);
+        res.json(await mutateSchedule(req, "schedule.assign", patch, true));
       } catch (error) {
+        const presented = presentScheduleMutationError(error);
+        if (presented) return res.status(presented.status).json(presented.body);
         if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);
         res.status(500).json({ message: "Failed to assign coach" });
       }
@@ -408,45 +372,12 @@ export function registerScheduleRoutes(app: Express): void {
     async (req, res) => {
       try {
         const { className, coachName } = req.body;
-        const existing = await storage.getScheduleById(req.params.id);
-        if (!existing) return res.status(404).json({ message: "Schedule not found" });
-        const expectedVersion = readExpectedVersion(req.body?.expectedVersion);
-        if (expectedVersion === null) return res.status(428).json(VERSION_REQUIRED);
-        if (existing.version !== expectedVersion) return res.status(409).json(VERSION_CONFLICT);
-        if (isDuplicateCoach(coachName, existing.coachName2)) {
-          return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
-        }
-        // Locked weeks freeze class names; coach assignment stays open.
-        if (existing.isClassLocked && className !== undefined && className !== existing.className) {
-          return res.status(409).json(SCHEDULE_LOCKED);
-        }
-        const pending = await pendingAssignmentWarnings({
-          scheduleId: existing.id,
-          venueId: existing.venueId,
-          date: existing.date,
-          timeSlotId: existing.timeSlotId,
-          before: existing,
-          after: { coachName: coachName !== undefined ? coachName : existing.coachName, coachName2: existing.coachName2 },
-          confirmed: req.body?.confirmWarnings,
-        });
-        if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
-        const updateData: ScheduleUpdate = { className, coachName };
-        const promoted = promoteCoachSlots({
-          coachName: coachName !== undefined ? coachName : existing.coachName,
-          coachName2: existing.coachName2,
-          coach1IsTeaching: !!existing.coach1IsTeaching,
-          coach2IsTeaching: !!existing.coach2IsTeaching,
-        });
-        if (promoted) Object.assign(updateData, promoted);
-        const schedule = await auditedScheduleWrite(req, "schedule.update", existing, () =>
-          storage.updateSchedule(req.params.id, updateData, expectedVersion),
-        );
-        res.json(schedule);
+        res.json(await mutateSchedule(req, "schedule.update", { className, coachName }));
       } catch (error) {
+        const presented = presentScheduleMutationError(error);
+        if (presented) return res.status(presented.status).json(presented.body);
         if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);
-        if (isPgUniqueViolation(error)) {
-          return res.status(409).json({ code: "DUPLICATE_CLASS_IN_CELL", message: "此時段已經有相同班級" });
-        }
+        if (isPgUniqueViolation(error)) return res.status(409).json({ code: "DUPLICATE_CLASS_IN_CELL", message: "此時段已經有相同班級" });
         res.status(500).json({ message: "Failed to update schedule" });
       }
     }
@@ -487,25 +418,10 @@ export function registerScheduleRoutes(app: Express): void {
         if (coach2IsTeaching !== undefined)
           updateData.coach2IsTeaching = !!coach2IsTeaching;
         const existing = await storage.getScheduleById(req.params.id);
+        requireScheduleVersion(existing, readExpectedVersion(req.body?.expectedVersion));
         if (!existing) return res.status(404).json({ message: "Schedule not found" });
-        const expectedVersion = readExpectedVersion(req.body?.expectedVersion);
-        if (expectedVersion === null) return res.status(428).json(VERSION_REQUIRED);
-        if (existing.version !== expectedVersion) return res.status(409).json(VERSION_CONFLICT);
         const nextCoach1 = updateData.coachName !== undefined ? updateData.coachName : existing.coachName;
         const nextCoach2 = updateData.coachName2 !== undefined ? updateData.coachName2 : existing.coachName2;
-        if (isDuplicateCoach(nextCoach1, nextCoach2)) {
-          return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
-        }
-        const pending = await pendingAssignmentWarnings({
-          scheduleId: existing.id,
-          venueId: existing.venueId,
-          date: existing.date,
-          timeSlotId: existing.timeSlotId,
-          before: existing,
-          after: { coachName: nextCoach1, coachName2: nextCoach2 },
-          confirmed: req.body?.confirmWarnings,
-        });
-        if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
         // Never leave slot 2 filled while slot 1 is empty. The candidate is
         // read before the coachCount=1 rule nulls slot 2, so dropping to one
         // coach keeps the only coach on the card instead of deleting them.
@@ -516,11 +432,11 @@ export function registerScheduleRoutes(app: Express): void {
           coach2IsTeaching: updateData.coach2IsTeaching ?? !!existing.coach2IsTeaching,
         });
         if (promoted) Object.assign(updateData, promoted);
-        const schedule = await auditedScheduleWrite(req, "schedule.patch", existing, () =>
-          storage.updateSchedule(req.params.id, updateData, expectedVersion),
-        );
+        const schedule = await mutateSchedule(req, "schedule.patch", updateData);
         res.json(schedule);
       } catch (error) {
+        const presented = presentScheduleMutationError(error);
+        if (presented) return res.status(presented.status).json(presented.body);
         if (error instanceof ScheduleVersionConflictError) return res.status(409).json(VERSION_CONFLICT);
         if (isPgUniqueViolation(error)) {
           return res.status(409).json({ code: "DUPLICATE_CLASS_IN_CELL", message: "此時段已經有相同班級" });

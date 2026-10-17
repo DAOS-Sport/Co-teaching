@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { storage } from "../storage";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
-import { inTransaction } from "../shared/dbContext";
+import { inScheduleTransaction as inTransaction } from "../infrastructure/scheduling/transaction";
 import { ADMIN_ACTOR, recordAudit, requestIdOf } from "../shared/audit";
 
 export function registerVenueRoutes(app: Express): void {

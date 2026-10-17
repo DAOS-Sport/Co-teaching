@@ -5,7 +5,12 @@ type Db = typeof db;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 const activeTransaction = new AsyncLocalStorage<Tx>();
+const scopedDb = new AsyncLocalStorage<Db>();
 let baseDb: Db = db;
+/** A wake owns one connection; concurrent HTTP calls never mutate the shared DB. */
+export function withDbScope<T>(connection: unknown, fn: () => T): T {
+  return scopedDb.run(connection as Db, fn);
+}
 
 /**
  * The transaction this call runs inside, or the shared pool outside one.
@@ -13,7 +18,7 @@ let baseDb: Db = db;
  * operation-audit row commit or roll back together.
  */
 export function currentDb(): Db {
-  return (activeTransaction.getStore() as unknown as Db | undefined) ?? baseDb;
+  return (activeTransaction.getStore() as unknown as Db | undefined) ?? scopedDb.getStore() ?? baseDb;
 }
 
 export function isInTransaction(): boolean {
@@ -23,7 +28,7 @@ export function isInTransaction(): boolean {
 /** Runs `fn` in one transaction; nested calls join the outer one. */
 export async function inTransaction<T>(fn: () => Promise<T>): Promise<T> {
   if (activeTransaction.getStore()) return fn();
-  return baseDb.transaction((tx) => activeTransaction.run(tx, fn));
+  return (scopedDb.getStore() ?? baseDb).transaction((tx) => activeTransaction.run(tx, fn));
 }
 
 /**

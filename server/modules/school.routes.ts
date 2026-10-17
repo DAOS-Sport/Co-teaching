@@ -79,22 +79,8 @@ export function registerSchoolRoutes(app: Express): void {
     }
   });
 
-  app.post("/api/admin/import-schedule/:schoolCode", requireAdminPassword, async (req, res) => {
-    try {
-      const { schoolCode } = req.params;
-      if (!isValidSchoolCode(schoolCode)) {
-        return res.status(400).json({ message: "Invalid school code" });
-      }
-      const { importScheduleData } = await import("../import-schedule");
-      const count = await importScheduleData();
-      res.json({
-        message: `Successfully imported ${count} schedule records`,
-        count,
-      });
-    } catch (error) {
-      console.error("Error importing schedule:", error);
-      res.status(500).json({ message: "Failed to import schedule data" });
-    }
+  app.post("/api/admin/import-schedule/:schoolCode", requireAdminPassword, (_req, res) => {
+    res.status(410).json({ code: "LEGACY_IMPORT_RETIRED", message: "舊示範匯入已停用，請使用場館課表的預覽／確認匯入。" });
   });
 
   app.get("/api/:schoolCode/teachers", validateSchoolCode, requireAdminPassword, async (req, res) => {

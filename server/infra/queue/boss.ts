@@ -14,23 +14,31 @@
  *     the previous one left off.
  */
 import PgBoss from "pg-boss";
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { env } from "../../config/env";
 
 let bossInstance: PgBoss | null = null;
+let producerInstance: PgBoss | null = null;
 let startPromise: Promise<PgBoss> | null = null;
+let stopPromise: Promise<void> | null = null;
 let shutdownHooked = false;
+const scopedProducer = new AsyncLocalStorage<PgBoss>();
+export function withQueueProducer<T>(producer: PgBoss, fn: () => T): T { return scopedProducer.run(producer, fn); }
 
 function buildBoss(): PgBoss {
   return new PgBoss({
     connectionString: env.databaseUrl,
     // Keep a small pool so we don't fight the main app for connections.
     max: 4,
+    migrate: false,
     // Default retry policy — individual jobs may override per-publish.
     retryLimit: 3,
     retryDelay: 60,
     retryBackoff: true,
     // Auto-clean completed/failed jobs after a week so the table doesn't grow unbounded.
     archiveCompletedAfterSeconds: 60 * 60 * 24 * 7,
+    archiveFailedAfterSeconds: 60 * 60 * 24 * 7,
+    deleteAfterDays: 7,
   });
 }
 
@@ -50,6 +58,7 @@ function hookShutdown(): void {
  * multiple times concurrently; the second caller awaits the first.
  */
 export async function startBoss(): Promise<PgBoss> {
+  if (stopPromise) await stopPromise;
   if (bossInstance) return bossInstance;
   if (startPromise) return startPromise;
 
@@ -81,12 +90,21 @@ export function getBoss(): PgBoss {
   return bossInstance;
 }
 
+/** Producer methods use the caller's DB transaction; no start/migration/worker is run. */
+export function getQueueProducer(): PgBoss {
+  return scopedProducer.getStore() ?? bossInstance ?? (producerInstance ??= buildBoss());
+}
+
+export function setQueueProducerForTest(producer: PgBoss | null) { producerInstance = producer; }
+
 export async function stopBoss(): Promise<void> {
-  if (!bossInstance) return;
+  if (stopPromise) return stopPromise;
+  if (!bossInstance && startPromise) await startPromise;
   const b = bossInstance;
-  bossInstance = null;
-  startPromise = null;
-  await b.stop({ graceful: true, timeout: 30_000 }).catch((e) => {
-    console.error("[boss] error during stop", e);
-  });
+  if (!b) return;
+  stopPromise = (async () => {
+    await b.stop({ graceful: true, timeout: 30_000 });
+    if (bossInstance === b) { bossInstance = null; startPromise = null; }
+  })();
+  try { await stopPromise; } finally { stopPromise = null; }
 }

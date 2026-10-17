@@ -6,6 +6,7 @@ import type { PoolClient } from "@neondatabase/serverless";
 import { ragicSyncItems, ragicSyncRuns } from "@shared/schema";
 import { recordAppLog } from "./shared/appLog";
 import { fetchWithTimeout } from "./shared/http/fetchWithTimeout";
+import { advanceRagicCheckpoint, type RagicCheckpoint, type RagicCheckpointControl, type RagicCheckpointSource } from "./modules/notificationWake/ragic-checkpoint";
 import {
   type RagicRecord,
   decideVenue,
@@ -220,6 +221,33 @@ async function fetchRagicRecords(
   }
 
   throw new Error(`Ragic API failed for ${apiUrl}: ${lastMessage}`);
+}
+
+/** Request-scoped source snapshot: no retry sleep and no private upstream body in errors. */
+export async function fetchBoundedRagicSource(source: RagicCheckpointSource, control: RagicCheckpointControl): Promise<RagicRecord[]> {
+  if (!control.signal || !Number.isFinite(control.deadlineMs)) throw new Error("invalid_ragic_step_control");
+  const remaining = control.deadlineMs - (control.now ?? Date.now)();
+  if (control.signal.aborted || remaining <= 0 || control.shouldContinue?.() === false) throw new Error("ragic_step_interrupted");
+  const apiKey = process.env.RAGIC_API_KEY;
+  if (!apiKey) throw new Error("ragic_api_key_not_configured");
+  const apiUrl = source === "departments" ? RAGIC_DEPT_API_URL : source === "coaches" ? RAGIC_COACH_API_URL : source === "employees" ? RAGIC_EMPLOYEE_API_URL : null;
+  if (!apiUrl) throw new Error("invalid_ragic_source");
+  let response: Awaited<ReturnType<typeof fetchWithTimeout>>;
+  try {
+    response = await fetchWithTimeout(`${apiUrl}?api&APIKey=${encodeURIComponent(apiKey)}&limit=500`, { timeoutMs: Math.min(8_000, remaining), signal: control.signal });
+  } catch { throw new Error("ragic_source_transport_failed"); }
+  if (control.signal.aborted || (control.now ?? Date.now)() >= control.deadlineMs || control.shouldContinue?.() === false) throw new Error("ragic_step_interrupted");
+  if (!response.ok) throw new Error("ragic_source_http_failed");
+  const parsed = parseRagicBody(response.body);
+  if (!parsed.ok) throw new Error(`ragic_source_${parsed.kind}`);
+  // No reviewed pagination contract is available. A full page cannot prove a complete snapshot.
+  if (parsed.records.length >= 500) throw new Error("ragic_source_completeness_unproven");
+  return parsed.records;
+}
+
+/** Caller owns the fail-closed lock and transaction containing this step plus its job.data checkpoint. */
+export async function advanceBoundedRagicSync(data: RagicCheckpoint, control: RagicCheckpointControl) {
+  return advanceRagicCheckpoint(data, { storage, fetchSource: fetchBoundedRagicSource, excludedNames: EXCLUDED_NAMES, venueColors: VENUE_COLORS }, control);
 }
 
 async function syncVenues(): Promise<SyncResult["venues"]> {
@@ -508,7 +536,14 @@ export function setupRagicSyncCron() {
 
   // Taiwan has no DST, so 03:00 Asia/Taipei is the same instant as the
   // old "0 19 * * *" in server-local UTC — just written the way it reads.
-  cron.schedule(
+  startRagicDailySchedule();
+
+  console.log(`[Ragic] daily sync scheduled 03:00 Asia/Taipei; boot sync in ${BOOT_SYNC_DELAY_MS / 1000}s`);
+}
+
+/** Explicit operational entry: preserves the daily job without boot-time writes. */
+export function startRagicDailySchedule() {
+  return cron.schedule(
     "0 3 * * *",
     () => {
       console.log("[Ragic] daily sync triggered (03:00 Asia/Taipei)");
@@ -519,5 +554,4 @@ export function setupRagicSyncCron() {
     { timezone: "Asia/Taipei" },
   );
 
-  console.log(`[Ragic] daily sync scheduled 03:00 Asia/Taipei; boot sync in ${BOOT_SYNC_DELAY_MS / 1000}s`);
 }

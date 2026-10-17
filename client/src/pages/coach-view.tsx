@@ -17,7 +17,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { Check, ChevronsUpDown } from "lucide-react";
-import type { Schedule, Venue, TimeSlot } from "@shared/schema";
+import type { ScheduleDto as Schedule, VenueDto as Venue, TimeSlotDto as TimeSlot } from "@shared/contracts";
 import { UNSTAFFED_COACH, isPlaceholderCoach } from "@shared/scheduleRules";
 import { getExtendedWeekDays, getExtendedWeekdayNames, getExtendedWeekEnd } from "@/utils/special-workdays";
 import AdminLayout from "@/components/admin-layout";

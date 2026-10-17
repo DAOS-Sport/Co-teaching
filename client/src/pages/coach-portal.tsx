@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { ChevronLeft, ChevronRight, Phone, User, Clock, MapPin, LogOut, BookOpen, Video, Calendar, CheckSquare, ExternalLink, AlertCircle, CheckCircle2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
-import type { CoachUser, Schedule, Venue, TimeSlot, VenueInfo, CoachAvailability } from "@shared/schema";
+import type { CoachUserDto as CoachUser, ScheduleDto as Schedule, VenueDto as Venue, TimeSlotDto as TimeSlot, VenueInfoDto as VenueInfo, CoachAvailabilityDto as CoachAvailability } from "@shared/contracts";
 
 type ScheduleWithDetails = Schedule & { venue: Venue; timeSlot: TimeSlot };
 

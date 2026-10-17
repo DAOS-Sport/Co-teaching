@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import type { User } from "@shared/schema";
+import type { UserDto as User } from "@shared/contracts";
 
 export function useAuth() {
   // For public deployment, disable automatic auth queries to prevent Replit Auth redirects

@@ -9,7 +9,7 @@
 
 export type WeeklyPushType = "weekly";
 export type WeeklyPushTriggerSource = "cron" | "manual" | "retry";
-export type WeeklyPushRunStatus =
+export type WeeklyPushRunStatus = "unknown"
   | "queued"
   | "preparing"
   | "sending"
@@ -18,7 +18,7 @@ export type WeeklyPushRunStatus =
   | "partial_success"
   | "failed"
   | "cancelled";
-export type WeeklyPushRecipientStatus =
+export type WeeklyPushRecipientStatus = "processing" | "accepted" | "unknown"
   | "pending"
   | "sending"
   | "success"

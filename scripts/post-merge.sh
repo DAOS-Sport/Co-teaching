@@ -1,7 +1,11 @@
-#!/bin/bash
-set -e
-npm install
-# 將空字串/Enter 自動送入 drizzle-kit push，
-# 在罕見的互動式提示出現時選擇預設（最安全）選項，
-# 避免 post-merge / 部署流程因等待輸入而 hang 死。
-echo "" | npm run db:push
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pulling source is not authorization to migrate a database, install lifecycle
+# hooks, or restart the running app. Replit gives postMerge only 20 seconds.
+test -f package.json
+test -f package-lock.json
+printf '%s\n' \
+  'Source updated. No database migration or application restart was run.' \
+  'Before running the app, use npm ci, npm run check, npm test, npm run build.' \
+  'Database migrations require a separate reviewed migration and approval.'

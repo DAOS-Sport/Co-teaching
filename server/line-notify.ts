@@ -1,18 +1,22 @@
+import { featureFlags } from "./config/featureFlags";
+import { currentDb } from "./shared/dbContext";
+import { enqueueTextNotification , findSavedTextNotification } from "./modules/notification/delivery.service";
+import { notificationIdentity, sendDurableText } from "./modules/notification/delivery.service";
+import { buildDailyNotifications, enqueueDailyNotifications, parseDailyTargetDate, type DailyEnqueueOptions, type DailyNotificationPlan } from "./modules/notificationWake/daily-plan";
+import { notificationBatchMayContinue, type NotificationBatchControl } from "./modules/notificationWake/notification-batch";
 import { isRealCoachName } from "@shared/scheduleRules";
-import cron from 'node-cron';
 import { storage } from './storage';
 import { format, addDays, startOfWeek, parseISO } from 'date-fns';
 import { zhTW } from 'date-fns/locale';
 import { db } from './db';
 import { lineNotifyLogs, coachUsers, coachAvailability, coachVenuePreferences, schedules, venues, timeSlots } from '@shared/schema';
 import { eq, and, between } from 'drizzle-orm';
-import { fetchWithTimeout } from './shared/http/fetchWithTimeout';
 import { env } from './config/env';
 
 // 教練前台連結 — 推播訊息結尾附上，提醒教練以系統公告為準
 const coachPortalUrl = (): string => `${env.publicOrigin}/coach-portal`;
 
-const LINE_PUSH_URL = 'https://api.line.me/v2/bot/message/push';
+
 
 const DAY_NAMES = ['', '一', '二', '三', '四', '五', '六', '日'];
 
@@ -51,35 +55,10 @@ async function dailyLogAlreadyExists(
   return existing.length > 0;
 }
 
-async function sendLinePushMessage(lineId: string, message: string): Promise<boolean> {
-  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-  if (!token) {
-    console.error('LINE_CHANNEL_ACCESS_TOKEN not configured');
-    return false;
-  }
-
-  // Task #32: enforce a hard timeout. Without this, a stalled LINE API
-  // call would block the daily/weekly cron handler indefinitely.
-  const result = await fetchWithTimeout(LINE_PUSH_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      to: lineId,
-      messages: [{ type: 'text', text: message }],
-    }),
-  });
-
-  if (!result.ok) {
-    console.error(
-      `LINE push failed for ${lineId}: status=${result.status} ` +
-        `code=${result.errorCode} msg=${result.errorMessage ?? ''}`,
-    );
-    return false;
-  }
-  return true;
+export async function sendLinePushMessage(lineId: string, message: string): Promise<boolean> {
+  const day = new Date().toISOString().slice(0, 10);
+  const result = await sendDurableText({ notificationId: notificationIdentity("legacy-message-day", [day, lineId, message]), to: lineId, text: message });
+  return result.accepted;
 }
 
 /**
@@ -225,15 +204,9 @@ async function sendWeeklyScheduleNotifications(): Promise<void> {
   }
 }
 
-export function setupWeeklyNotificationCron(): void {
-  cron.schedule('0 12 * * 0', () => {
-    console.log('[LINE Notify] Cron triggered: Sunday 12:00 Asia/Taipei');
-    sendWeeklyScheduleNotifications().catch(err =>
-      console.error('[LINE Notify] Weekly cron unhandled rejection:', err),
-    );
-  }, { timezone: 'Asia/Taipei' });
-
-  console.log('[LINE Notify] Weekly notification cron scheduled (Sunday 12:00 Asia/Taipei)');
+export async function setupWeeklyNotificationCron() {
+  const { configureNotificationSchedules } = await import("./infra/queue/runtime");
+  return configureNotificationSchedules({ enabled: true, kinds: ["weekly"] });
 }
 
 async function sendDailyTomorrowNotifications(): Promise<void> {
@@ -270,13 +243,13 @@ async function sendDailyTomorrowNotifications(): Promise<void> {
     // ── 3. 建立 coachName → coachUser 對照表（用 linkedCoachName 優先）
     const approvedCoaches = await storage.getApprovedCoachUsers();
     const coachMap = new Map<string, typeof approvedCoaches[0]>();
+    const ambiguousCoaches = new Set<string>();
     for (const c of approvedCoaches) {
       if (!c.lineId) continue;
       const key = c.linkedCoachName || c.name;
-      if (key && !coachMap.has(key)) {
-        // 避免同名覆蓋：先登記者保留
-        coachMap.set(key, c);
-      }
+      if (!key) continue;
+      if (coachMap.has(key) || ambiguousCoaches.has(key)) { coachMap.delete(key); ambiguousCoaches.add(key); }
+      else coachMap.set(key, c);
     }
 
     // ── 5. 收集明天有課的教練名單（去重）
@@ -295,7 +268,8 @@ async function sendDailyTomorrowNotifications(): Promise<void> {
     for (const coachName of Array.from(scheduledCoachNames)) {
       try {
       // 6a. 有無 LINE ID
-      const coach = coachMap.get(coachName);
+      if (ambiguousCoaches.has(coachName)) { failCount++; console.error("daily_notification_ambiguous_recipient"); continue; }
+        const coach = coachMap.get(coachName);
       if (!coach) {
         noLineIdCoaches.push(coachName);
         continue;
@@ -309,11 +283,7 @@ async function sendDailyTomorrowNotifications(): Promise<void> {
 
       // 6b'. 應用層快路徑：若已有當日記錄，直接跳過，省下訊息組裝與 INSERT
       //      （DB unique index 仍是最終事實來源，下面的 ON CONFLICT 才是真正的鎖）
-      if (await dailyLogAlreadyExists(coachName, tomorrowStr)) {
-        console.log(`[LINE Notify] Daily: skip ${coachName} (pre-check: already logged)`);
-        skipDupCount++;
-        continue;
-      }
+
 
       // 6c. 組訊息
       let message = `📋 明日課程提醒\n`;
@@ -335,34 +305,19 @@ async function sendDailyTomorrowNotifications(): Promise<void> {
 
       // 6d. 原子防重：先 INSERT log（ON CONFLICT DO NOTHING）搶到「鎖」才推
       //     若 returning 為空 → 同一秒被別的執行緒搶走，跳過
-      const inserted = await db.insert(lineNotifyLogs).values({
-        coachName,
-        lineId: coach.lineId!,
-        content: message,
-        notifyType: 'daily',
-        scheduleDate: tomorrowStr,
-      }).onConflictDoNothing({
-        target: [lineNotifyLogs.coachName, lineNotifyLogs.notifyType, lineNotifyLogs.scheduleDate],
-      }).returning({ id: lineNotifyLogs.id });
-
-      if (inserted.length === 0) {
-        // 索引層真正擋下：可能是同秒併發、或 pre-check 與 INSERT 之間插入
-        console.log(`[LINE Notify] Daily: skip ${coachName} (race lost on uniq_daily_notify)`);
-        skipDupCount++;
-        continue;
-      }
-
-      // 6e. 發送；若失敗，刪掉剛插入的 log 讓下次 cron 可重試
-      const success = await sendLinePushMessage(coach.lineId!, message);
-      if (success) {
-        sentCount++;
-        console.log(`[LINE Notify] Daily: sent to ${coachName}`);
-      } else {
-        failCount++;
-        console.error(`[LINE Notify] Daily: failed for ${coachName}, rolling back log`);
-        await db.delete(lineNotifyLogs).where(eq(lineNotifyLogs.id, inserted[0].id))
-          .catch(e => console.error('[LINE Notify] Failed to rollback log:', e));
-      }
+      const notificationId = notificationIdentity("daily-reminder", [tomorrowStr, coach.id]);
+        const prior = await findSavedTextNotification(notificationId);
+        if (!prior && await dailyLogAlreadyExists(coachName, tomorrowStr)) {
+          failCount++;
+          console.error("daily_notification_unknown_legacy_untracked_operator_review_required");
+          continue;
+        }
+        const delivery = await sendDurableText({ notificationId, to: coach.lineId!, text: message, reuseSavedPayload: true });
+        if (delivery.accepted) {
+          sentCount++;
+          await db.insert(lineNotifyLogs).values({ coachName, lineId: coach.lineId!, content: message, notifyType: "daily", scheduleDate: tomorrowStr })
+            .onConflictDoNothing({ target: [lineNotifyLogs.coachName, lineNotifyLogs.notifyType, lineNotifyLogs.scheduleDate] });
+        } else { failCount++; console.error("daily_notification_" + delivery.state); }
       } catch (coachErr) {
         console.error(`[LINE Notify] Daily: unexpected error for ${coachName}, skipping:`, coachErr);
         failCount++;
@@ -373,42 +328,19 @@ async function sendDailyTomorrowNotifications(): Promise<void> {
       console.log(`[LINE Notify] No LINE ID: ${noLineIdCoaches.join(', ')}`);
     }
     console.log(`[LINE Notify] Daily done. Date=${tomorrowStr} Sent=${sentCount} SkipDup=${skipDupCount} Failed=${failCount} NoLineId=${noLineIdCoaches.length}`);
+
+    if (failCount > 0) throw new Error("daily_notifications_incomplete_or_unknown");
   } catch (error) {
     console.error('[LINE Notify] Error sending daily notifications:', error);
+
+    throw error;
   }
 }
 
 // SWIM-02: 課表解鎖通知
-export async function notifyScheduleUnlocked(venueId: string, startDate: string, endDate: string): Promise<void> {
-  try {
-    const rows = await db
-      .select({ coachName: schedules.coachName, coachName2: schedules.coachName2, venueName: venues.name })
-      .from(schedules)
-      .innerJoin(venues, eq(schedules.venueId, venues.id))
-      .where(and(eq(schedules.venueId, venueId), between(schedules.date, startDate, endDate)));
-
-    const venueName = rows[0]?.venueName || '';
-    const weekStr = format(parseISO(startDate), 'M/d', { locale: zhTW });
-    const notified = new Set<string>();
-
-    for (const row of rows) {
-      for (const name of [row.coachName, row.coachName2].filter(isRealCoachName)) {
-        if (notified.has(name)) continue;
-        notified.add(name);
-        const byLinked = await db.select().from(coachUsers).where(eq(coachUsers.linkedCoachName, name)).limit(1);
-        const byName = await db.select().from(coachUsers).where(eq(coachUsers.name, name)).limit(1);
-        const coach = byLinked[0] || byName[0];
-        if (!coach?.lineId) continue;
-        const msg =
-          `⚠️ 課表異動通知\n` +
-          `${venueName} ${weekStr} 週的課表已更新，請重新確認您的排課內容。\n\n` +
-          `建議重新查看教練端課表，並視需要重新匯出 Google Calendar。`;
-        await sendLinePushMessage(coach.lineId, msg).catch(() => {});
-      }
-    }
-  } catch (e) {
-    console.error('[LINE Notify] notifyScheduleUnlocked error:', e);
-  }
+export async function notifyScheduleUnlocked(venueId: string, startDate: string, endDate: string) {
+  const rows = await currentDb().select({ id: schedules.id, version: schedules.version }).from(schedules).where(and(eq(schedules.venueId, venueId), between(schedules.date, startDate, endDate)));
+  return enqueueScheduleUnlocked(venueId, startDate, endDate, notificationIdentity("legacy-unlock-snapshot", rows.sort((a,b) => a.id.localeCompare(b.id))));
 }
 
 // SWIM-03: 發送填寫提醒給尚未填寫的教練
@@ -438,15 +370,52 @@ export async function sendFillReminderToCoaches(): Promise<{ sent: number }> {
   return { sent };
 }
 
-export function setupDailyNotificationCron(): void {
-  cron.schedule('0 19 * * *', () => {
-    console.log('[LINE Notify] Cron triggered: daily 19:00 Asia/Taipei');
-    sendDailyTomorrowNotifications().catch(err =>
-      console.error('[LINE Notify] Daily cron unhandled rejection:', err),
-    );
-  }, { timezone: 'Asia/Taipei' });
+export async function setupDailyNotificationCron() {
+  const { configureNotificationSchedules } = await import("./infra/queue/runtime");
+  return configureNotificationSchedules({ enabled: true, kinds: ["daily"] });
+}
 
-  console.log('[LINE Notify] Daily notify cron scheduled (19:00 Asia/Taipei)');
+/** The external due planner supplies this date; HTTP callers never select an arbitrary target. */
+export async function prepareDailyNotifications(targetDate: string, control: NotificationBatchControl = {}): Promise<DailyNotificationPlan> {
+  parseDailyTargetDate(targetDate);
+  if (!notificationBatchMayContinue(control)) throw new Error("daily_preparation_interrupted");
+  const targetSchedules = await storage.getSchedulesByDateRange(targetDate, targetDate);
+  if (!notificationBatchMayContinue(control)) throw new Error("daily_preparation_interrupted");
+  const approvedCoaches = targetSchedules.length ? await storage.getApprovedCoachUsers() : [];
+  if (!notificationBatchMayContinue(control)) throw new Error("daily_preparation_interrupted");
+  return buildDailyNotifications(targetDate, { schedules: targetSchedules, coaches: approvedCoaches,
+    portalUrl: coachPortalUrl(), notificationIdentity, isRealCoachName });
+}
+
+/** Persist the prepared plan in the parent job, then await one finite enqueue step per wake. */
+export async function enqueuePreparedDailyNotifications(plan: DailyNotificationPlan, options: DailyEnqueueOptions = {}) {
+  if (!options.dryRun && !process.env.LINE_CHANNEL_ACCESS_TOKEN) throw new Error("daily_line_token_not_configured");
+  return enqueueDailyNotifications(plan, { findSavedTextNotification, dailyLogAlreadyExists, enqueueTextNotification }, options);
 }
 
 export { sendWeeklyScheduleNotifications, sendDailyTomorrowNotifications };
+
+export async function enqueueScheduleUnlocked(venueId: string, startDate: string, endDate: string, operationId: string) {
+  if (!featureFlags.enableWeeklyPushQueue) return { status: "not_configured" as const, notificationIds: [] as string[] };
+  if (!operationId) throw new Error("A stable unlock operationId is required");
+  const tx = currentDb();
+  const rows = await tx.select({ coachName: schedules.coachName, coachName2: schedules.coachName2, venueName: venues.name }).from(schedules).innerJoin(venues, eq(schedules.venueId, venues.id)).where(and(eq(schedules.venueId, venueId), between(schedules.date, startDate, endDate)));
+  const venueName = rows[0]?.venueName ?? "";
+  const weekStr = format(parseISO(startDate), "M/d", { locale: zhTW });
+  const notified = new Set<string>();
+  const notificationIds: string[] = [];
+  for (const row of rows) for (const name of [row.coachName, row.coachName2].filter(isRealCoachName)) {
+    if (!name || notified.has(name)) continue;
+    notified.add(name);
+    const byLinked = await tx.select().from(coachUsers).where(eq(coachUsers.linkedCoachName, name)).limit(1);
+    const byName = byLinked.length ? [] : await tx.select().from(coachUsers).where(eq(coachUsers.name, name)).limit(1);
+    const coach = byLinked[0] ?? byName[0];
+    if (!coach?.lineId) continue;
+    const msg = `⚠️ 課表異動通知\n` +
+          `${venueName} ${weekStr} 週的課表已更新，請重新確認您的排課內容。\n\n` +
+          `建議重新查看教練端課表，並視需要重新匯出 Google Calendar。`;
+    const result = await enqueueTextNotification({ notificationId: notificationIdentity("schedule-unlock", [operationId, venueId, startDate, endDate, coach.id]), to: coach.lineId, text: msg });
+    notificationIds.push(result.notificationId);
+  }
+  return { status: "pending" as const, notificationIds };
+}

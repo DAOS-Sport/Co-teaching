@@ -24,6 +24,13 @@ import { areWeeklyPushWorkersReady } from "./weeklyPush.worker";
 import { reconcileWeeklyPushRun } from "./weeklyPush.reconcile";
 import type { AuditAction } from "@shared/auditActions";
 import { ADMIN_ACTOR, recordTriggerAudit, requestIdOf } from "../../shared/audit";
+import { externalWakeConfigured, getWakeReadiness } from '../notificationWake/wake-readiness';
+import { enqueueSavedRunRecovery } from '../notificationWake/wake-intake';
+
+async function intakeReady():Promise<boolean> {
+  if(externalWakeConfigured())return (await getWakeReadiness()).intakeReady;
+  return featureFlags.enableWeeklyPushQueue&&featureFlags.enableWeeklyPushWorker&&areWeeklyPushWorkersReady();
+}
 
 /** #3: queued pushes run on their own workers; record the trigger and its result. */
 const triggered = (req: Request, action: AuditAction, runId: string, after: Record<string, unknown>) =>
@@ -67,11 +74,7 @@ export function registerWeeklyPushRoutes(app: Express): void {
           .json({ message: "weekStartDate / weekEndDate 必須一起提供" });
       }
       try {
-        if (dryRun !== true && (
-          !featureFlags.enableWeeklyPushQueue ||
-          !featureFlags.enableWeeklyPushWorker ||
-          !areWeeklyPushWorkersReady()
-        )) {
+        if (dryRun !== true && !(await intakeReady())) {
           return res.status(503).json({
             message: "週推播 worker 尚未就緒，已禁止正式發送",
           });
@@ -96,6 +99,13 @@ export function registerWeeklyPushRoutes(app: Express): void {
           run: result.run,
         });
       } catch (err) {
+        const code = err instanceof Error ? err.message : "";
+        if (code === "weekly_push_legacy_history_blocked") {
+          return res.status(409).json({ code, message: "此週有舊版通知紀錄，請先核對；系統已停止重送。" });
+        }
+        if (code === "weekly_push_ambiguous_scheduled_coach") {
+          return res.status(409).json({ code, message: "有課教練對應到多個同名帳號，請先確認人員；系統已停止發送。" });
+        }
         console.error("[weeklyPush.routes] enqueue error", err);
         return res.status(500).json({
           message: "週推播排程失敗",
@@ -108,7 +118,11 @@ export function registerWeeklyPushRoutes(app: Express): void {
   app.get(
     "/api/admin/weekly-push/readiness",
     requireAdminPassword,
-    (_req, res) => {
+    async (_req, res) => {
+      if(externalWakeConfigured()) {
+        try {const readiness=await getWakeReadiness();return res.status(readiness.ready?200:503).json(readiness);}
+        catch {return res.status(503).json({ready:false,intakeReady:false,code:'wake_readiness_failed'});}
+      }
       const ready = featureFlags.enableWeeklyPushQueue &&
         featureFlags.enableWeeklyPushWorker && areWeeklyPushWorkersReady();
       return res.status(ready ? 200 : 503).json({ ready });
@@ -120,11 +134,17 @@ export function registerWeeklyPushRoutes(app: Express): void {
     requireAdminPassword,
     async (req, res) => {
       try {
+        if(externalWakeConfigured()) {
+          const receipt=await enqueueSavedRunRecovery(req.params.runId);
+          await triggered(req,'weekly_push.reconcile',req.params.runId,{result:'已排入恢復，原通知識別碼保持不變'});
+          return res.status(202).json({...receipt,message:'已排入恢復；實際結果請至 IT 治理與批次紀錄查看'});
+        }
         const run = await reconcileWeeklyPushRun(req.params.runId);
         if (!run) return res.status(404).json({ message: "找不到週推播紀錄" });
         await triggered(req, "weekly_push.reconcile", req.params.runId, { runId: req.params.runId, result: run.status });
         return res.json({ run });
       } catch (err) {
+        if(err instanceof Error&&err.message==='wake_archived_recovery_requires_review')return res.status(409).json({code:err.message,message:'工作已封存，需先核對原通知結果；尚未重新排入。'});
         return res.status(500).json({ message: err instanceof Error ? err.message : String(err) });
       }
     },
@@ -236,6 +256,7 @@ export function registerWeeklyPushRoutes(app: Express): void {
     async (req: Request, res: Response) => {
       const { runId } = req.params;
       try {
+        if(!(await intakeReady()))return res.status(503).json({message:'通知執行來源尚未就緒，已停止重新排入'});
         const result = await retryFailedRecipients(runId);
         await triggered(req, "weekly_push.retry", runId, { runId: result.run.id, recipients: result.recipientsCreated });
         return res.json({

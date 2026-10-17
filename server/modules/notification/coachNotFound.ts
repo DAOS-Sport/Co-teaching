@@ -1,3 +1,5 @@
+import { createLinePushAdapter } from "./lineNotify.adapter";
+import { notificationIdentity, sendDurableText } from "./delivery.service";
 import { randomUUID } from "node:crypto";
 import { fetchWithTimeout } from "../../shared/http/fetchWithTimeout";
 
@@ -7,21 +9,23 @@ export type AlertOutcome = {
   code: string;
 };
 
-export async function notifyCoachNotFound(
-  name: string,
-  config: { token: string | null; recipient: string | null },
-  send = fetchWithTimeout,
-): Promise<AlertOutcome> {
-  const eventId = randomUUID();
-  if (!config.recipient || !config.token) {
-    return { eventId, status: "not_configured", code: !config.recipient ? "missing_recipient" : "missing_token" };
+export async function notifyCoachNotFound(name: string, config: { recipient: string | null; token: string | null }, send?: typeof fetchWithTimeout): Promise<AlertOutcome> {
+  const eventId = notificationIdentity("coach-not-found-day", [new Date().toISOString().slice(0, 10), name, config.recipient]);
+  if (!config.recipient || !config.token) return { eventId, status: "not_configured", code: !config.recipient ? "MISSING_RECIPIENT" : "MISSING_TOKEN" };
+  const text = `【教練登入通知】\n教練「${name}」查無資料，請確認建檔。\n事件：${eventId}`;
+  if (send) {
+    // Preserve the existing isolated HTTP adapter seam. Runtime callers do not supply it.
+    const adapter = createLinePushAdapter({ token: config.token, timeoutMs: 8000, fetch: async (url, init) => {
+      const result = await send(String(url), { ...init, timeoutMs: 8000 });
+      if (!result.status) throw new Error("Transport result unknown");
+      return new Response(result.body, { status: result.status });
+    } });
+    const result = await adapter(config.recipient, text, randomUUID());
+    return { eventId, status: result.ok ? "accepted" : "failed", code: result.ok ? "LINE_ACCEPTED" : result.errorCode ?? "LINE_REQUEST_FAILED" };
   }
-  const result = await send("https://api.line.me/v2/bot/message/push", {
-    method: "POST", timeoutMs: 8_000,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.token}` },
-    body: JSON.stringify({ to: config.recipient, messages: [{ type: "text", text: `【教練登入通知】\n教練「${name}」查無資料，請確認建檔。\n事件：${eventId}` }] }),
-  });
-  return { eventId, status: result.ok ? "accepted" : "failed", code: result.ok ? "line_accepted" : result.errorCode ?? "unexpected_response" };
+  const result = await sendDurableText({ notificationId: eventId, to: config.recipient, text });
+  return { eventId, status: result.state === "not_configured" ? "not_configured" : result.accepted ? "accepted" : "failed",
+    code: result.state === "not_configured" ? "QUEUE_NOT_CONFIGURED" : result.accepted ? "LINE_ACCEPTED" : "LINE_ACCEPTANCE_UNKNOWN" };
 }
 
 export function coachNotFoundMessage(outcome: AlertOutcome): string {

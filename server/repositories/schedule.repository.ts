@@ -1,3 +1,4 @@
+import { copyBatchWeek } from "../adapters/repositories/schedule-batch.repository";
 /**
  * Schedule repository.
  *
@@ -53,7 +54,7 @@ export type ScheduleUpdateFields = Partial<{
   date: string;
   venueId: string;
   timeSlotId: string;
-  className: string;
+  className: string | null;
   coachName: string | null;
   coachName2: string | null;
   coachCount: number;
@@ -80,71 +81,10 @@ const rowAtVersion = (id: string, expectedVersion?: number) =>
     : and(eq(schedules.id, id), eq(schedules.version, expectedVersion));
 
 export class ScheduleRepository {
-  async copyWeekIntoEmptyCells(input: {
-    sourceStartDate: string;
-    sourceEndDate: string;
-    targetStartDate: string;
-    venueId: string;
-    commit: boolean;
-  }) {
-    return db.transaction(async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`${input.venueId}:${input.targetStartDate}`}))`);
-      const source = await tx.select().from(schedules).where(and(
-        eq(schedules.venueId, input.venueId),
-        between(schedules.date, input.sourceStartDate, input.sourceEndDate),
-        isNotNull(schedules.className),
-      ));
-      const targetEndDate = format(addDays(new Date(`${input.targetStartDate}T00:00:00`), 6), "yyyy-MM-dd");
-      const target = await tx.select().from(schedules).where(and(
-        eq(schedules.venueId, input.venueId),
-        between(schedules.date, input.targetStartDate, targetEndDate),
-      )).for("update");
-      const sourceStart = new Date(`${input.sourceStartDate}T00:00:00`);
-      const targetStart = new Date(`${input.targetStartDate}T00:00:00`);
-      const targetCells = new Map<string, typeof target>();
-      for (const row of target) {
-        const key = `${row.date}:${row.timeSlotId}`;
-        targetCells.set(key, [...(targetCells.get(key) ?? []), row]);
-      }
-      const planned: InsertScheduleType[] = [];
-      let duplicateClassSkipped = 0;
-      let occupiedCellSkipped = 0;
-      for (const row of source) {
-        const offset = Math.round((new Date(`${row.date}T00:00:00`).getTime() - sourceStart.getTime()) / 86_400_000);
-        const date = format(addDays(targetStart, offset), "yyyy-MM-dd");
-        const existing = targetCells.get(`${date}:${row.timeSlotId}`) ?? [];
-        if (existing.length > 0) {
-          const normalized = row.className!.replace(/\s+/g, "").toLocaleLowerCase();
-          if (existing.some((item) => item.className?.replace(/\s+/g, "").toLocaleLowerCase() === normalized)) duplicateClassSkipped++;
-          else occupiedCellSkipped++;
-          continue;
-        }
-        planned.push({
-          date,
-          venueId: row.venueId,
-          timeSlotId: row.timeSlotId,
-          className: row.className,
-          coachName: null,
-          coachName2: null,
-          coachCount: row.coachCount,
-          coach1IsTeaching: true,
-          coach2IsTeaching: false,
-        });
-      }
-      if (input.commit && planned.length > 0) {
-        await tx.insert(schedules).values(planned);
-      }
-      return {
-        sourceCount: source.length,
-        plannedCount: planned.length,
-        duplicateClassSkipped,
-        occupiedCellSkipped,
-        targetEndDate,
-        items: planned.map((row) => ({ date: row.date, timeSlotId: row.timeSlotId, className: row.className })),
-        committed: input.commit,
-      };
-    });
-  }
+  copyWeekIntoEmptyCells(input: {
+    sourceStartDate: string; sourceEndDate: string; targetStartDate: string;
+    venueId: string; commit: boolean; confirmationToken?: unknown;
+  }) { return copyBatchWeek(input); }
 
   async getSchedulesByDate(
     date: string

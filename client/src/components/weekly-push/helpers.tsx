@@ -1,4 +1,5 @@
 import { format } from "date-fns";
+import { notificationReceiptLabel } from "@/lib/schedule-ui";
 import { Badge } from "@/components/ui/badge";
 import {
   RefreshCw,
@@ -7,7 +8,7 @@ import {
   XCircle,
   Clock,
 } from "lucide-react";
-import type { WeeklyPushRun, WeeklyPushRecipient } from "@shared/schema";
+import type { WeeklyPushRunDto as WeeklyPushRun, WeeklyPushRecipientDto as WeeklyPushRecipient } from "@shared/contracts";
 
 export interface RunsResponse {
   runs: WeeklyPushRun[];
@@ -91,6 +92,8 @@ export function statusBadge(status: string) {
 }
 
 export function recipientStatusBadge(status: string) {
+  if (status === "accepted") return <Badge className="bg-emerald-100 text-emerald-800">{notificationReceiptLabel(status)}</Badge>;
+  if (status === "unknown") return <Badge variant="outline" className="text-amber-800">{notificationReceiptLabel(status)}</Badge>;
   switch (status) {
     case "success":
       return <Badge className="bg-green-500 whitespace-nowrap">成功</Badge>;

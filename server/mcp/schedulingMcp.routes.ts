@@ -7,6 +7,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { callSchedulingTool, schedulingTools } from "./schedulingTools";
+import { presentScheduleMutationError } from "../adapters/presenters/schedule-error";
 import {
   SCHEDULING_MCP_PATH,
   SCHEDULING_MCP_SCOPE,
@@ -74,7 +75,8 @@ export function registerSchedulingMcpRoutes(app: Express): void {
           }));
           return textResult(result);
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const presented = presentScheduleMutationError(error);
+          const message = presented?.body.code ?? (error instanceof Error ? error.message : String(error));
           console.warn(JSON.stringify({
             event: "scheduling_mcp_tool_call",
             tool: toolName,
@@ -83,7 +85,7 @@ export function registerSchedulingMcpRoutes(app: Express): void {
             durationMs: Date.now() - startedAt,
             at: new Date().toISOString(),
           }));
-          return textResult({ error: message }, true);
+          return textResult(presented ? { error: presented.body.message, ...presented.body } : { error: message }, true);
         }
       });
       await server.connect(transport);

@@ -1,3 +1,8 @@
+import { enqueueScheduleUnlocked } from "../line-notify";
+import { randomUUID } from "node:crypto";
+import { createSchedulingUseCases } from "../infrastructure/scheduling/composition";
+import { inScheduleTransaction } from "../infrastructure/scheduling/transaction";
+import { requireScheduleVersion } from "../core/scheduling/policies";
 import { and, between, eq, inArray, sql } from "drizzle-orm";
 import { txDb as db, inTransaction } from "../shared/dbContext";
 import { MCP_ACTOR, recordAudit, scheduleContext, scheduleFields } from "../shared/audit";
@@ -59,7 +64,7 @@ export const schedulingTools = [
     name: "create_or_update_schedules",
     title: "批次新增或更新課程",
     description:
-      "在指定場館一次新增最多 500 堂課。可先 previewOnly=true 預覽；updateMatching=true 時會更新同場館、日期、節次及班別完全相同的課程。",
+      "在指定場館一次新增最多 500 堂課。須先 previewOnly=true 取得確認 token，再以相同輸入提交；updateMatching=true 時會更新同場館、日期、節次及班別完全相同的課程。",
     inputSchema: objectSchema(
       {
         venueName: { type: "string", minLength: 1 },
@@ -82,6 +87,7 @@ export const schedulingTools = [
         },
         updateMatching: { type: "boolean", default: false },
         previewOnly: { type: "boolean", default: false },
+        confirmationToken: { type: "string", description: "Token from preview; commit requires the same input and current state" },
       },
       ["venueName", "rows"],
     ),
@@ -91,10 +97,13 @@ export const schedulingTools = [
     name: "update_schedule",
     title: "修改單堂課",
     description:
-      "用 scheduleId 修改一堂課，可變更日期、場館、節次、班別、兩位教練、教學角色、人數及備註。課表鎖定時需先解鎖，或在使用者明確要求下使用 forceLocked。",
+      "用 scheduleId 修改一堂課，可變更日期、場館、節次、班別、兩位教練、教學角色、人數及備註。必須提供 find_schedules 回傳的 version 作 expectedVersion。鎖定後仍可指派教練，不能以 forceLocked 略過鎖定班名政策。",
     inputSchema: objectSchema(
       {
         scheduleId: { type: "string", minLength: 1 },
+        expectedVersion: { type: "integer", minimum: 1 },
+        confirmWarnings: { type: "array", items: { type: "string", enum: ["COACH_CONFLICT", "COACH_UNAVAILABLE"] } },
+        confirmationToken: { type: "string" },
         date: { type: "string", format: "date" },
         venueName: { type: "string" },
         period: { type: "integer", minimum: 1, maximum: 7 },
@@ -107,7 +116,7 @@ export const schedulingTools = [
         notes: { type: ["string", "null"] },
         forceLocked: { type: "boolean", default: false },
       },
-      ["scheduleId"],
+      ["scheduleId", "expectedVersion"],
     ),
     annotations: mutatingAnnotations(false),
   },
@@ -141,6 +150,7 @@ export const schedulingTools = [
         startDate: { type: "string", format: "date" },
         endDate: { type: "string", format: "date" },
         locked: { type: "boolean" },
+        operationId: { type: "string", minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9:_-]{1,128}$", description: "同一次解鎖操作的固定識別碼；重試沿用，避免建立重複通知" },
       },
       ["venueName", "startDate", "endDate", "locked"],
     ),
@@ -224,7 +234,7 @@ const mcpAudit = (entry: Omit<Parameters<typeof recordAudit>[0], "actor">) =>
 
 export async function callSchedulingTool(name: string, rawArgs: unknown): Promise<unknown> {
   const args = asObject(rawArgs);
-  if (MUTATING_TOOLS.has(name)) return inTransaction(() => dispatchSchedulingTool(name, args));
+  if (MUTATING_TOOLS.has(name)) return inScheduleTransaction(() => dispatchSchedulingTool(name, args));
   return dispatchSchedulingTool(name, args);
 }
 
@@ -353,10 +363,16 @@ async function createOrUpdateSchedules(args: JsonObject) {
     ].join("\t")),
   ].join("\n");
   const mode = optionalBoolean(args, "updateMatching") ? "update_matching" : "insert_only";
+  const providedFieldsByLine: Record<number, Array<"date" | "period" | "className" | "coachName" | "coachName2" | "coachCount" | "notes">> = {};
+  rawRows.forEach((row, index) => {
+    providedFieldsByLine[index + 2] = (["date", "period", "className", "coachName", "coachName2", "coachCount", "notes"] as const)
+      .filter(field => Object.prototype.hasOwnProperty.call(row, field));
+  });
+  const options = { providedFieldsByLine };
   if (optionalBoolean(args, "previewOnly")) {
-    return previewScheduleImport(venue.id, text, mode);
+    return previewScheduleImport(venue.id, text, mode, options);
   }
-  const result = await commitScheduleImport(venue.id, text, mode);
+  const result = await commitScheduleImport(venue.id, text, mode, args.confirmationToken, options);
   if (result.committed) {
     await mcpAudit({
       action: "schedule.import",
@@ -372,10 +388,8 @@ async function createOrUpdateSchedules(args: JsonObject) {
 async function updateSchedule(args: JsonObject) {
   const scheduleId = requiredString(args, "scheduleId");
   const existing = await storage.getScheduleById(scheduleId);
+  requireScheduleVersion(existing, args.expectedVersion);
   if (!existing) throw new Error(`找不到課程 ${scheduleId}`);
-  if (existing.isClassLocked && !optionalBoolean(args, "forceLocked")) {
-    throw new Error("課程已鎖定；請先解鎖，或在使用者明確要求後設 forceLocked=true");
-  }
   const update: ScheduleUpdateFields = {};
   if (args.date !== undefined) update.date = requiredDate(args, "date");
   if (args.venueName !== undefined) update.venueId = (await resolveVenue(requiredString(args, "venueName"))).id;
@@ -394,7 +408,6 @@ async function updateSchedule(args: JsonObject) {
   let nextCoach1 = update.coachName !== undefined ? update.coachName : existing.coachName;
   let nextCoach2 = update.coachName2 !== undefined ? update.coachName2 : existing.coachName2;
   let nextCoachCount = update.coachCount ?? existing.coachCount;
-  if (sameCoach(nextCoach1, nextCoach2)) throw new Error("同一堂課不可指派同一位教練兩次");
   if (nextCoach2 && nextCoachCount < 2) {
     nextCoachCount = 2;
     update.coachCount = 2;
@@ -411,14 +424,13 @@ async function updateSchedule(args: JsonObject) {
     update.coach1IsTeaching = update.coach2IsTeaching ?? existing.coach2IsTeaching;
     update.coach2IsTeaching = false;
   }
-  const updated = await storage.updateSchedule(scheduleId, update);
-  await mcpAudit({
-    action: "schedule.update",
-    entity: "schedule",
-    entityId: scheduleId,
-    before: scheduleFields(existing),
-    after: scheduleFields(updated),
-    reason: await scheduleContext(existing),
+  const useCases = createSchedulingUseCases({ actor: MCP_ACTOR, requestId: null, action: "schedule.update" });
+  const updated = await useCases.updateSchedule({
+    scheduleId, patch: update,
+    expectedVersion: typeof args.expectedVersion === "number" ? args.expectedVersion : null,
+    confirmWarnings: args.confirmWarnings,
+    confirmationToken: typeof args.confirmationToken === "string" ? args.confirmationToken : null,
+    auditContext: { actor: MCP_ACTOR, requestId: null },
   });
   const [detail] = (await storage.getSchedulesByDateRange(updated.date, updated.date)).filter((row) => row.id === scheduleId);
   const assignedCoaches = [updated.coachName, updated.coachName2].filter(isRealCoachName);
@@ -475,8 +487,17 @@ async function setScheduleLock(args: JsonObject) {
   const venue = await resolveVenue(requiredString(args, "venueName"));
   const { startDate, endDate } = readDateRange(args);
   const locked = requiredBoolean(args, "locked");
+  const operationId = optionalNullableString(args, "operationId") ?? randomUUID();
+  if (!/^[A-Za-z0-9:_-]{1,128}$/.test(operationId)) throw new Error("Invalid operationId");
+  const before = await storage.getSchedulesByDateRange(startDate, endDate);
+  const changed = before.some(row => row.venueId === venue.id && !!row.isClassLocked !== locked);
+  if (!changed) return { success: true, venue: venue.name, startDate, endDate, locked, notification: { status: "unchanged" } };
+  let notification: { status: string; notificationIds?: string[] } = { status: "not_requested" };
   if (locked) await storage.lockSchedules(venue.id, startDate, endDate);
-  else await storage.unlockSchedules(venue.id, startDate, endDate);
+  else {
+    await storage.unlockSchedules(venue.id, startDate, endDate);
+    notification = await enqueueScheduleUnlocked(venue.id, startDate, endDate, operationId);
+  }
   await mcpAudit({
     action: locked ? "schedule.lock" : "schedule.unlock",
     entity: "schedule_week",
@@ -484,7 +505,7 @@ async function setScheduleLock(args: JsonObject) {
     after: { venueName: venue.name, startDate, endDate, locked },
     reason: `${venue.name} ${startDate} ~ ${endDate}`,
   });
-  return { success: true, venue: venue.name, startDate, endDate, locked };
+  return { success: true, venue: venue.name, startDate, endDate, locked, notification };
 }
 
 async function getCoachAvailability(args: JsonObject) {
@@ -653,6 +674,7 @@ async function resolveCoachName(input: string): Promise<string> {
 function formatSchedule(row: Awaited<ReturnType<typeof storage.getSchedulesByDateRange>>[number]) {
   return {
     scheduleId: row.id,
+    version: row.version,
     date: row.date,
     venueName: row.venue.name,
     period: row.timeSlot.order,

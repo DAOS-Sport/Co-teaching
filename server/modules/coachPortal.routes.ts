@@ -10,7 +10,7 @@ import {
   verifyCoachSessionFor,
 } from "../shared/auth/coachPortalSession";
 import { requireAdminPassword, verifyAdminPassword } from "../shared/auth/adminPassword";
-import { inTransaction } from "../shared/dbContext";
+import { inScheduleTransaction as inTransaction } from "../infrastructure/scheduling/transaction";
 import { ADMIN_ACTOR, coachActor, coachFields, recordAudit, requestIdOf } from "../shared/audit";
 
 /** #3: the coach binds their own LINE to an existing account. */

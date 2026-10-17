@@ -19,6 +19,7 @@ interface ServiceStatus {
   endpoints?: string[];
   lastSyncTime?: string | null;
   isSyncing?: boolean;
+  wake?: {intakeReady:boolean;executorFresh:boolean;lastWakeAt:string|null;backlog:number;failed:number;unknown:number;unresolved:number;oldestPendingAt:string|null;ragicStatus:string;missedOrUnplanned:string[]};
 }
 
 interface ApiEndpoint {
@@ -399,6 +400,15 @@ function ServiceChips({ services }: { services: ServiceStatus[] }) {
               <p>{open.description}</p>
               {open.checkedAt && <p>檢查時間：{taipei(open.checkedAt)}（台北）</p>}
               {open.code && <p>檢查結果代碼：<span className="font-mono">{open.code}</span></p>}
+              {open.wake && <div className="space-y-1 rounded border p-3">
+                <p>可持久排入：{open.wake.intakeReady?'就緒':'未就緒'}；執行來源：{open.wake.executorFresh?'最近有完成喚醒':'逾時或尚未驗證'}</p>
+                <p>最近喚醒：{open.wake.lastWakeAt?taipei(open.wake.lastWakeAt):'尚無紀錄'}</p>
+                <p>待處理 {open.wake.backlog}／工作失敗 {open.wake.failed}／接受結果未知 {open.wake.unknown}／人員待確認 {open.wake.unresolved}</p>
+                {open.wake.oldestPendingAt&&<p>最早待處理：{taipei(open.wake.oldestPendingAt)}</p>}
+                <p>Ragic 同步：{open.wake.ragicStatus}</p>
+                {!!open.wake.missedOrUnplanned.length&&<p>到期尚未完成規劃：{open.wake.missedOrUnplanned.join('、')}</p>}
+                <p>「已排入」僅代表資料已保存；通知結果依各批次平台接受紀錄確認。</p>
+              </div>}
               {open.lastSyncTime && (
                 <p>
                   上次同步：{taipei(open.lastSyncTime)}

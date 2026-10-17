@@ -12,7 +12,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import type { Schedule, TimeSlot, Venue } from "@shared/schema";
+import type { ScheduleDto as Schedule, TimeSlotDto as TimeSlot, VenueDto as Venue } from "@shared/contracts";
 
 type TeacherIdentity = {
   schoolCode: string;

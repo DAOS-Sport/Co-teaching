@@ -1,3 +1,7 @@
+import { currentDb, inTransaction } from "../../shared/dbContext";
+import { getQueueProducer } from "../../infra/queue/boss";
+import { queueTransactionDb } from "../../infra/queue/transaction";
+import { prepareSavedDelivery } from "../notification/delivery.repository";
 /**
  * Repository for the weekly push pipeline (Task #23).
  *
@@ -6,12 +10,13 @@
  * Drizzle calls. Per the architecture rules from Task #22, routes
  * never touch the DB directly.
  */
-import { and, desc, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
-import { db } from "../../db";
+import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
+import { txDb as db } from "../../shared/dbContext";
 import {
   weeklyPushRuns,
   weeklyPushRecipients,
   weeklyPushOutbox,
+  lineNotifyLogs,
   type WeeklyPushRun,
   type WeeklyPushRecipient,
   type InsertWeeklyPushRun,
@@ -23,38 +28,29 @@ import type {
 } from "./types";
 
 export const weeklyPushRepo = {
-  async createRunBundle(
-    runInput: InsertWeeklyPushRun,
-    recipientInputs: InsertWeeklyPushRecipient[],
-    queueName: string,
-  ): Promise<{ run: WeeklyPushRun; created: boolean; recipientsCreated: number }> {
-    return db.transaction(async (tx) => {
+  async nextUnfinishedRun(cursor:string|null) {
+    const find=async(after:string|null)=>db.select().from(weeklyPushRuns).where(and(
+      isNull(weeklyPushRuns.completedAt),inArray(weeklyPushRuns.status,['queued','preparing','sending','unknown','failed']),
+      after?gt(weeklyPushRuns.id,after):undefined,
+    )).orderBy(weeklyPushRuns.id).limit(1);
+    return (await find(cursor))[0] ?? (cursor?(await find(null))[0]:null) ?? null;
+  },
+  async createRunBundle(runInput: InsertWeeklyPushRun, recipientInputs: InsertWeeklyPushRecipient[], queueName: string) {
+    return inTransaction(async () => {
+      const tx = currentDb();
       const [run] = await tx.insert(weeklyPushRuns).values(runInput).onConflictDoNothing().returning();
       if (!run) {
-        const [existing] = await tx.select().from(weeklyPushRuns)
-          .where(eq(weeklyPushRuns.idempotencyKey, runInput.idempotencyKey!)).limit(1);
-        if (!existing) throw new Error("weekly run conflict without persisted winner");
+        const [existing] = await tx.select().from(weeklyPushRuns).where(eq(weeklyPushRuns.idempotencyKey, runInput.idempotencyKey)).limit(1);
+        if (!existing) throw new Error("Run identity collision");
         return { run: existing, created: false, recipientsCreated: 0 };
       }
-      const recipients = recipientInputs.length
-        ? await tx.insert(weeklyPushRecipients).values(recipientInputs).returning()
-        : [];
-      await tx.update(weeklyPushRuns).set({
-        totalCount: recipients.length,
-        skippedCount: run.dryRun ? recipients.length : 0,
-        updatedAt: new Date(),
-      }).where(eq(weeklyPushRuns.id, run.id));
-      await tx.insert(weeklyPushOutbox).values({
-        runId: run.id,
-        queueName,
-        payloadJson: { runId: run.id },
-        status: "pending",
-      });
-      return {
-        run: { ...run, totalCount: recipients.length, skippedCount: run.dryRun ? recipients.length : 0 },
-        created: true,
-        recipientsCreated: recipients.length,
-      };
+      const saved = recipientInputs.map(prepareSavedDelivery);
+      const recipients = saved.length ? await tx.insert(weeklyPushRecipients).values(saved).returning() : [];
+      const skippedCount = run.dryRun ? recipients.length : 0;
+      await tx.update(weeklyPushRuns).set({ totalCount: recipients.length, skippedCount, updatedAt: new Date() }).where(eq(weeklyPushRuns.id, run.id));
+      const jobId = await getQueueProducer().send(queueName, { runId: run.id }, { id: run.id, retryLimit: 3, db: queueTransactionDb(tx) });
+      if (!jobId) throw new Error("Notification queue is unavailable or job identity conflicts");
+      return { run: { ...run, totalCount: recipients.length, skippedCount }, created: true, recipientsCreated: recipients.length };
     });
   },
 
@@ -94,6 +90,15 @@ export const weeklyPushRepo = {
       .where(eq(weeklyPushRuns.idempotencyKey, key))
       .limit(1);
     return row ?? null;
+  },
+
+  async hasLegacyWeeklyLogsInWindow(startDate: string, endDate: string): Promise<boolean> {
+    const [row] = await db.select({ id: lineNotifyLogs.id }).from(lineNotifyLogs).where(and(
+      eq(lineNotifyLogs.notifyType, "weekly"),
+      gte(lineNotifyLogs.scheduleDate, startDate),
+      lte(lineNotifyLogs.scheduleDate, endDate),
+    )).limit(1);
+    return Boolean(row);
   },
 
   async getRunById(id: string): Promise<WeeklyPushRun | null> {
@@ -137,11 +142,7 @@ export const weeklyPushRepo = {
   },
 
   async listRuns(limit = 50): Promise<WeeklyPushRun[]> {
-    return db
-      .select()
-      .from(weeklyPushRuns)
-      .orderBy(desc(weeklyPushRuns.createdAt))
-      .limit(Math.min(Math.max(limit, 1), 200));
+    return db.select().from(weeklyPushRuns).where(eq(weeklyPushRuns.pushType, "weekly")).orderBy(desc(weeklyPushRuns.createdAt)).limit(limit);
   },
 
   async listRunsByStatuses(statuses: WeeklyPushRunStatus[]): Promise<WeeklyPushRun[]> {
@@ -154,7 +155,7 @@ export const weeklyPushRepo = {
     patch: Partial<{
       status: WeeklyPushRunStatus;
       startedAt: Date;
-      completedAt: Date;
+      completedAt: Date | null;
       totalCount: number;
       successCount: number;
       failureCount: number;
@@ -274,31 +275,17 @@ export const weeklyPushRepo = {
       );
   },
 
-  async countRecipientStatuses(runId: string): Promise<{
-    pending: number;
-    sending: number;
-    retryWait: number;
-    success: number;
-    failed: number;
-    skipped: number;
-    total: number;
-  }> {
-    const rows = await db
-      .select({
-        status: weeklyPushRecipients.status,
-      })
-      .from(weeklyPushRecipients)
-      .where(eq(weeklyPushRecipients.runId, runId));
-
-    const acc = { pending: 0, sending: 0, retryWait: 0, success: 0, failed: 0, skipped: 0, total: rows.length };
-    for (const r of rows) {
-      const s = r.status as WeeklyPushRecipientStatus;
-      if (s === "pending") acc.pending += 1;
-      else if (s === "sending") acc.sending += 1;
-      else if (s === "retry_wait") acc.retryWait += 1;
-      else if (s === "success") acc.success += 1;
-      else if (s === "failed") acc.failed += 1;
-      else if (s === "skipped") acc.skipped += 1;
+  async countRecipientStatuses(runId: string) {
+    const rows = await db.select({ status: weeklyPushRecipients.status, nextRetryAt: weeklyPushRecipients.nextRetryAt }).from(weeklyPushRecipients).where(eq(weeklyPushRecipients.runId, runId));
+    const acc = { pending: 0, sending: 0, retryWait: 0, success: 0, failed: 0, skipped: 0, unknown: 0, total: rows.length };
+    for (const row of rows) {
+      if (row.status === "pending") acc.pending++;
+      else if (["processing", "sending"].includes(row.status)) acc.sending++;
+      else if (row.status === "retry_wait" || (row.status === "unknown" && row.nextRetryAt)) acc.retryWait++;
+      else if (["accepted", "success"].includes(row.status)) acc.success++;
+      else if (row.status === "failed") acc.failed++;
+      else if (row.status === "skipped") acc.skipped++;
+      else acc.unknown++;
     }
     return acc;
   },

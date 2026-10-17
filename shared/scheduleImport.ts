@@ -23,6 +23,7 @@ export type ScheduleImportParseError = {
 export type ScheduleImportParseResult = {
   rows: ScheduleImportInputRow[];
   errors: ScheduleImportParseError[];
+  providedFields?: Array<keyof Omit<ScheduleImportInputRow, "line">>;
 };
 
 const HEADER_ALIASES: Record<string, keyof Omit<ScheduleImportInputRow, "line">> = {
@@ -36,9 +37,11 @@ const HEADER_ALIASES: Record<string, keyof Omit<ScheduleImportInputRow, "line">>
   教練1: "coachName",
   教練一: "coachName",
   coach1: "coachName",
+  coachname: "coachName",
   教練2: "coachName2",
   教練二: "coachName2",
   coach2: "coachName2",
+  coachname2: "coachName2",
   教練人數: "coachCount",
   coachcount: "coachCount",
   備註: "notes",
@@ -142,7 +145,7 @@ export function parseScheduleImportText(text: string): ScheduleImportParseResult
   if (rows.length === 0 && errors.length === 0) {
     errors.push({ line: 2, message: "沒有可匯入的資料列" });
   }
-  return { rows, errors };
+  return { rows, errors, providedFields: Array.from(columns.keys()) };
 }
 
 export const SCHEDULE_IMPORT_TEMPLATE = [

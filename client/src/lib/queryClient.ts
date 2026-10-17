@@ -87,11 +87,11 @@ export async function apiRequestWithConfirm(
   data: Record<string, unknown>,
   preconfirmed: string[] = [],
 ): Promise<Response> {
-  const send = (confirmWarnings: string[]) =>
+  const send = (confirmWarnings: string[], confirmationToken?: string) =>
     fetch(url, {
       method,
       headers: { ...getAdminAuthHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ ...data, confirmWarnings }),
+      body: JSON.stringify({ ...data, confirmWarnings, confirmationToken }),
       credentials: "include",
     });
 
@@ -100,11 +100,13 @@ export async function apiRequestWithConfirm(
     const body = await res.clone().json().catch(() => null);
     if (body?.code === "CONFIRM_REQUIRED" && Array.isArray(body.warnings)) {
       const warnings = body.warnings as ScheduleWarning[];
-      const confirmed = await askConfirm("請確認", warnings.map((warning) => warning.message));
+      const messages = warnings.map((warning) => warning?.message).filter((message): message is string => typeof message === "string" && message.trim().length > 0);
+      if (messages.length === 0) messages.push(typeof body.message === "string" && body.message.trim().length > 0 ? body.message : "資料狀態已變更，請重新確認後再儲存。");
+      const confirmed = await askConfirm("請確認", messages);
       if (!confirmed) {
         throw new Error("已取消，未儲存");
       }
-      res = await send([...preconfirmed, ...warnings.map((warning) => warning.code)]);
+      res = await send([...preconfirmed, ...warnings.map((warning) => warning.code)], typeof body.confirmationToken === "string" ? body.confirmationToken : undefined);
     }
   }
 
@@ -114,7 +116,7 @@ export async function apiRequestWithConfirm(
     if (body?.code === "VERSION_CONFLICT") {
       queryClient.invalidateQueries({ predicate: (query) => isScheduleListKey(query.queryKey) });
     }
-    if (typeof body?.message === "string") throw new Error(body.message);
+    if (typeof body?.message === "string") throw Object.assign(new Error(body.message), { code: body.code, status: res.status });
   }
   await throwIfResNotOk(res);
   if (method !== "DELETE") applySavedSchedule(await res.clone().json().catch(() => null));
