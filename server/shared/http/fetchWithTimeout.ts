@@ -23,6 +23,7 @@
  */
 
 import { env } from "../../config/env";
+import { currentOperation, remainingOperationMs, assertOperationActive } from './operationScope';
 
 const DEFAULT_TIMEOUT_MS = env.outboundHttpTimeoutMs;
 
@@ -47,14 +48,16 @@ export async function fetchWithTimeout(
   url: string,
   opts: FetchWithTimeoutOptions = {},
 ): Promise<FetchResult> {
-  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal: callerSignal, ...init } = opts;
+  assertOperationActive(1500);
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, signal: explicitSignal, ...init } = opts;
+  const callerSignal=explicitSignal ?? currentOperation()?.signal;
   const ctrl = new AbortController();
   const onCallerAbort = () => ctrl.abort();
   if (callerSignal) {
     if (callerSignal.aborted) ctrl.abort();
     else callerSignal.addEventListener("abort", onCallerAbort, { once: true });
   }
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const timer = setTimeout(() => ctrl.abort(), remainingOperationMs(timeoutMs,1500));
   try {
     const res = await fetch(url, { ...init, signal: ctrl.signal });
     const body = await res.text().catch(() => "");

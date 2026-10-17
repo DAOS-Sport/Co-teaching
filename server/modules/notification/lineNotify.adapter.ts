@@ -1,5 +1,6 @@
 import { env } from "../../config/env";
 import { isRetryKey, type PushOutcome } from "../../core/notifications/delivery";
+import { assertOperationActive, currentOperation, remainingOperationMs } from '../../shared/http/operationScope';
 
 const LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push";
 export interface LinePushResult extends PushOutcome { ok: boolean }
@@ -12,7 +13,12 @@ export function createLinePushAdapter(options: { token: string; timeoutMs?: numb
       return { ok: false, outcome: "rejected", status: 0, errorCode: "CONFIG_ERROR", errorMessage: "A configured token and saved retry key are required" };
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
+    assertOperationActive(1500);
+    const parent = currentOperation()?.signal;
+    const abort = () => controller.abort();
+    parent?.addEventListener('abort', abort, {once:true});
+    if(parent?.aborted) controller.abort();
+    const timer = setTimeout(() => controller.abort(), remainingOperationMs(options.timeoutMs ?? 10_000,1500));
     try {
       const response = await (options.fetch ?? globalThis.fetch)(LINE_PUSH_URL, {
         method: "POST", signal: controller.signal,
@@ -29,6 +35,6 @@ export function createLinePushAdapter(options: { token: string; timeoutMs?: numb
         errorCode: unknown ? "LINE_ACCEPTANCE_UNKNOWN" : "HTTP_4XX", errorMessage: unknown ? "Platform acceptance is unknown" : "Platform rejected the request" };
     } catch {
       return { ok: false, outcome: "unknown", status: 0, errorCode: controller.signal.aborted ? "TIMEOUT" : "NETWORK_ERROR", errorMessage: "Platform acceptance is unknown" };
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); parent?.removeEventListener('abort',abort); }
   };
 }

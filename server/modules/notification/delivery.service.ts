@@ -13,11 +13,12 @@ function identityUuid(value: string): string {
 export function notificationIdentity(purpose: string, values: unknown[]): string {
   return createHash("sha256").update(JSON.stringify([purpose, ...values])).digest("hex");
 }
-export async function enqueueTextNotification(input: { notificationId: string; to: string; text: string; reuseSavedPayload?: boolean;}) {
+export async function enqueueTextNotification(input: { notificationId: string; to: string; text: string; reuseSavedPayload?: boolean; latestCreateAt?:number;}) {
   if (!featureFlags.enableWeeklyPushQueue) return { notificationId: "", runId: "", reused: false, state: "not_configured" as const };
   const runId = identityUuid(`notification-run:${input.notificationId}`);
   const recipientId = textNotificationRecipientId(input.notificationId);
   const day = new Date().toISOString().slice(0, 10);
+  if(input.latestCreateAt!==undefined&&(!Number.isFinite(input.latestCreateAt)||Date.now()>=input.latestCreateAt))throw Error('notification_slot_expired');
   const result = await weeklyPushRepo.createRunBundle({ id: runId, pushType: "notification", weekStartDate: day, weekEndDate: day,
     triggerSource: "manual", destination: `notification:${runId}`, idempotencyKey: `notification:${input.notificationId}`, status: "queued", dryRun: false,
   }, [{ id: recipientId, runId, recipientType: "notification", recipientName: "notification", lineUserId: input.to, status: "pending",

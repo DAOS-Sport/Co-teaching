@@ -10,7 +10,7 @@ import { prepareSavedDelivery } from "../notification/delivery.repository";
  * Drizzle calls. Per the architecture rules from Task #22, routes
  * never touch the DB directly.
  */
-import { and, desc, eq, gte, inArray, isNotNull, lt, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { txDb as db } from "../../shared/dbContext";
 import {
   weeklyPushRuns,
@@ -28,6 +28,13 @@ import type {
 } from "./types";
 
 export const weeklyPushRepo = {
+  async nextUnfinishedRun(cursor:string|null) {
+    const find=async(after:string|null)=>db.select().from(weeklyPushRuns).where(and(
+      isNull(weeklyPushRuns.completedAt),inArray(weeklyPushRuns.status,['queued','preparing','sending','unknown','failed']),
+      after?gt(weeklyPushRuns.id,after):undefined,
+    )).orderBy(weeklyPushRuns.id).limit(1);
+    return (await find(cursor))[0] ?? (cursor?(await find(null))[0]:null) ?? null;
+  },
   async createRunBundle(runInput: InsertWeeklyPushRun, recipientInputs: InsertWeeklyPushRecipient[], queueName: string) {
     return inTransaction(async () => {
       const tx = currentDb();

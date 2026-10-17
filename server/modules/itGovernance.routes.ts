@@ -8,6 +8,7 @@ import { max, sql } from "drizzle-orm";
 import { coachPortalSessions } from "@shared/schema";
 import { db } from "../db";
 import { getAvailableSchools, schoolSchemaName } from "../multi-school-db";
+import { getWakeReadiness, externalWakeConfigured } from './notificationWake/wake-readiness';
 
 const LOGIN_EVIDENCE_DAYS = 30;
 
@@ -70,6 +71,9 @@ export function registerItGovernanceRoutes(app: Express): void {
     ]);
 
     const services = [
+      ...(externalWakeConfigured()? [{id:'external-notification-wake',name:'外部通知排程',description:'GitHub OIDC 喚醒，同址 Autoscale；排入收據與平台接受結果分開記錄。',enabled:true,configured:true,
+        ...(await getWakeReadiness().then(r=>({status:r.executorFresh&&r.code==='wake_fresh'?'ok':'error',code:r.code,wake:r})).catch(()=>({status:'error',code:'wake_readiness_failed'}))),
+        endpoints:['GET /api/admin/weekly-push/readiness']}]:[]),
       {
         id: "line-notify",
         name: "LINE 推播通知",

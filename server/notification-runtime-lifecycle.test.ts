@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -94,7 +95,7 @@ test("actual stopBoss retains live instance after failure and can retry the same
     async start() { live = true; }
     async stop() { stops++; if (stops === 1) throw new Error("synthetic-stop-failure"); live = false; }
   }
-  const boss = load("./infra/queue/boss.ts", { "pg-boss": FakeBoss, "../../config/env": { env: { databaseUrl: "synthetic-no-network" } } }, { process: { once() {} } });
+  const boss = load("./infra/queue/boss.ts", { "node:async_hooks": { AsyncLocalStorage }, "pg-boss": FakeBoss, "../../config/env": { env: { databaseUrl: "synthetic-no-network" } } }, { process: { once() {} } });
   const started = await boss.startBoss();
   await assert.rejects(boss.stopBoss(), /synthetic-stop-failure/);
   assert.equal(live, true);
@@ -110,7 +111,7 @@ test("actual concurrent stopBoss requests share one stop and clear reference aft
   let release!: () => void, stops = 0;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   class FakeBoss { on() {} async start() {} async stop() { stops++; await gate; } }
-  const boss = load("./infra/queue/boss.ts", { "pg-boss": FakeBoss, "../../config/env": { env: { databaseUrl: "synthetic-no-network" } } }, { process: { once() {} } });
+  const boss = load("./infra/queue/boss.ts", { "node:async_hooks": { AsyncLocalStorage }, "pg-boss": FakeBoss, "../../config/env": { env: { databaseUrl: "synthetic-no-network" } } }, { process: { once() {} } });
   const started = await boss.startBoss();
   const first = boss.stopBoss(), second = boss.stopBoss();
   assert.equal(boss.getBoss(), started, "reference remains available until actual stop completes");

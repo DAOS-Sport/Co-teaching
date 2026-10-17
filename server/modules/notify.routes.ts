@@ -11,6 +11,8 @@ import {
 } from "../line-notify";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
 import { env } from "../config/env";
+import { externalWakeConfigured } from './notificationWake/wake-readiness';
+import { enqueueExternalDateJob } from './notificationWake/wake-intake';
 
 /** #3: a sent push cannot be rolled back, so it is recorded with its outcome. */
 const triggered = (req: Request, action: AuditAction, entityId: string, after: Record<string, unknown>, reason?: string) =>
@@ -200,12 +202,17 @@ export function registerNotifyRoutes(app: Express): void {
     requireAdminPassword,
     async (req, res) => {
       try {
+        if(externalWakeConfigured()){
+          const result=await enqueueExternalDateJob('daily');
+          return res.status(result.queued?202:200).json({...result,message:result.queued?'已排入明日提醒，尚未送出':'此日期的工作已完成；未建立新提醒'});
+        }
         await sendDailyTomorrowNotifications();
         await triggered(req, "notify.daily", "daily", { result: "已觸發" });
         res.json({ success: true, message: "每日推播已觸發" });
       } catch (error) {
         console.error("Manual daily notify error:", error);
         await triggered(req, "notify.daily", "daily", { result: "失敗" });
+        if(error instanceof Error&&error.message==='external_wake_date_job_requires_review')return res.status(409).json({code:'EXTERNAL_WAKE_DATE_JOB_REQUIRES_REVIEW',message:'此日期的工作已失敗或取消，尚未重新排入；請先至 IT 治理核對'});
         res.status(500).json({ message: "推播失敗", error: String(error) });
       }
     }

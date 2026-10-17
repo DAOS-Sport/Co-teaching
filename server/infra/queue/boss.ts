@@ -14,6 +14,7 @@
  *     the previous one left off.
  */
 import PgBoss from "pg-boss";
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { env } from "../../config/env";
 
 let bossInstance: PgBoss | null = null;
@@ -21,6 +22,8 @@ let producerInstance: PgBoss | null = null;
 let startPromise: Promise<PgBoss> | null = null;
 let stopPromise: Promise<void> | null = null;
 let shutdownHooked = false;
+const scopedProducer = new AsyncLocalStorage<PgBoss>();
+export function withQueueProducer<T>(producer: PgBoss, fn: () => T): T { return scopedProducer.run(producer, fn); }
 
 function buildBoss(): PgBoss {
   return new PgBoss({
@@ -89,7 +92,7 @@ export function getBoss(): PgBoss {
 
 /** Producer methods use the caller's DB transaction; no start/migration/worker is run. */
 export function getQueueProducer(): PgBoss {
-  return bossInstance ?? (producerInstance ??= buildBoss());
+  return scopedProducer.getStore() ?? bossInstance ?? (producerInstance ??= buildBoss());
 }
 
 export function setQueueProducerForTest(producer: PgBoss | null) { producerInstance = producer; }

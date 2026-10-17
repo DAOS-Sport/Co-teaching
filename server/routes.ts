@@ -17,10 +17,14 @@ import { registerAllModules } from "./modules/_registry";
 import { registerRemoteMcpRoutes } from "./mcp/remoteMcp.routes";
 import { registerSchedulingMcpRoutes } from "./mcp/schedulingMcp.routes";
 import { registerSchedulingOAuthRoutes } from "./mcp/schedulingOAuth";
+import { registerNotificationWakeRoutes } from './modules/notificationWake/wake.routes';
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // 0. Fail fast on missing config (esp. ADMIN_PASSWORD in production)
   assertBootConfig();
+
+  // This OIDC-only endpoint must not read/touch a browser session before rejecting a JWT.
+  registerNotificationWakeRoutes(app);
 
   // 1. Auth middleware (sessions + Replit OIDC)
   await setupAuth(app);

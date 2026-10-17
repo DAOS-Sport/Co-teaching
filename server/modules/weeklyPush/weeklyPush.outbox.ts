@@ -3,15 +3,20 @@ import { weeklyPushOutbox } from "@shared/schema";
 import { currentDb, inTransaction } from "../../shared/dbContext";
 import { getQueueProducer } from "../../infra/queue/boss";
 import { queueTransactionDb } from "../../infra/queue/transaction";
+import { assertOperationActive } from '../../shared/http/operationScope';
 
 /** Recovery for existing outbox records only. New bundles enqueue directly in their transaction. */
-export async function dispatchWeeklyPushOutbox() {
+export async function dispatchWeeklyPushOutbox(options:{limit?:number}={}) {
+  const limit=options.limit??50;
+  if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('outbox_batch_invalid');
+  assertOperationActive(1500);
   return inTransaction(async () => {
     const tx = currentDb();
     const rows = await tx.select().from(weeklyPushOutbox).where(and(eq(weeklyPushOutbox.status, "pending"),
-      or(isNull(weeklyPushOutbox.nextAttemptAt), lte(weeklyPushOutbox.nextAttemptAt, new Date())))).limit(50).for("update", { skipLocked: true });
+      or(isNull(weeklyPushOutbox.nextAttemptAt), lte(weeklyPushOutbox.nextAttemptAt, new Date())))).limit(limit).for("update", { skipLocked: true });
     const producer = getQueueProducer();
     for (const row of rows) {
+      assertOperationActive(1500);
       const adapter = queueTransactionDb(tx);
       const data = row.payloadJson as { runId?: string };
       if (data.runId !== row.runId) throw new Error("Invalid saved outbox identity");

@@ -189,6 +189,8 @@ export async function buildRecipientsForWeek(
 }
 
 interface EnqueueParams {
+  /** External due slots may not create a new historical delivery after their window closes. */
+  latestCreateAt?: number;
   weekStartDate?: string;
   weekEndDate?: string;
   dryRun?: boolean;
@@ -248,6 +250,7 @@ export async function enqueueWeeklyPush(
     payloadJson: { ...b.payload, messageVersion: 1, capturedAt: new Date().toISOString() },
   }));
 
+  if(params.latestCreateAt!==undefined&&(!Number.isFinite(params.latestCreateAt)||Date.now()>=params.latestCreateAt))throw Error('weekly_push_slot_expired');
   const bundle = await weeklyPushRepo.createRunBundle({
     id: runId,
     pushType: PUSH_TYPE,

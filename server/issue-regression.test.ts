@@ -341,6 +341,7 @@ test("API log keeps route templates only, splits errors from refusals, skips the
   app.get("/api/schedules", (_req, res) => { res.status(409).json({ message: "locked" }); });
   app.get("/api/venues", (_req, res) => { res.json([]); });
   app.get("/api/admin/it/logs", (_req, res) => { res.status(401).json({ message: "需要管理員密碼" }); });
+  app.post("/api/internal/notification-wake", (_req, res) => { res.status(401).json({ code: "AUTHORIZATION_REQUIRED" }); });
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -351,6 +352,7 @@ test("API log keeps route templates only, splits errors from refusals, skips the
     await fetch(`${url}/api/schedules?coachName=王教練`);
     await fetch(`${url}/api/venues`);
     await fetch(`${url}/api/admin/it/logs`);
+    await fetch(`${url}/api/internal/notification-wake`, { method: "POST" });
     await fetch(`${url}/api/no-such-thing/${secretId}`);
     await flushAppLogForTest();
     assert.deepEqual(rows.map((r) => [r.level, r.route, r.status]), [

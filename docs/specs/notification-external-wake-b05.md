@@ -1,3 +1,30 @@
+# B05-EW2：Autoscale 外部喚醒實作與切換
+
+狀態：EW2 實作與驗收中，2026-10-17；正式啟用尚未完成。下方 EW1 是保留的原設計，不是目前實作收據。
+
+## 本輪授權與契約
+
+使用者要求「照 SPEC 繼續實作外部喚醒…驗收和切換完成」，授權本 repo/default branch 的有限 OIDC workflow、既有網域 Autoscale 發布與單一執行路徑接手。既有兩份新增 SQL 不重跑，teacher migration 維持 HOLD；不增加任意 DDL、新付費服務或把既有秘密複製到 GitHub。發布時 DB copy 必須 0，資料庫身份及既有表資料前後獨立核對。
+
+- `server/autoscale-app.ts` 是顯式同址部署入口；一般 web boot 不啟 SQL、cron、worker。接收器先 canary，再 active；`NOTIFICATION_WAKE_NOT_BEFORE` 固定首次啟用界線，不能每次重啟往後推。
+- `.github/workflows/notification-wake.yml` 在 default `main` 執行；不 checkout、不讀 contents、不用長效秘密。唯一新增權限 `id-token: write`，固定目的地／repo ID／owner ID／ref／workflow／event／audience／簽章及生命期。repository variable `NOTIFICATION_WAKE_ENABLED=true` 另行啟用；default branch workflow-only 更新與 app release 分開驗。
+- 每次有效 request 有 20 秒 scope，16.5 秒開始取消，保留 owned DB／report child 回收時間；先 drain、有限 planning、再 drain，最多 100 單位。沒有回應後必要背景工作；driver 最多 10 分鐘／60 請求／8 次錯誤重試，incomplete 留原工作給下一 tick。GitHub 排程仍非準點 SLA。
+- 專屬 native PG 保留 provider 設定，但安全 nonce／timeout 不可被 URI query 覆蓋。claim/ACK 保留 wire timestamptz 微秒，成功續段不耗錯誤 retry；apply/checkpoint/ACK 同交易，失敗 ACK 也受原 claim fence。中斷取消只針對 own PID＋nonce＋role＋DB；無法證明 own backend 消失時，明確回 `WAKE_BACKEND_QUIESCENCE_UNVERIFIED`，不宣稱已停。
+- 固定 Taipei daily19／weekly Sunday12／Ragic03 到期日期；不建立已過期時段。持久 heartbeat 保存 gap 與 legacy rescue cursor，遺漏窗口持續顯示，不以新 heartbeat 抹除、不自動補送歷史。先處理舊工作，避免 planning 餓死 recipient。
+- 只使用既批 queue 名稱；`notification-reconcile` 明確承載 typed `ragic-sync`／`wake-heartbeat`，不挪用 cleanup。canary 僅 schema/queue/receipt，無 business enqueue、expire 或外送；active 不啟 timekeeper／supervisor，顯式 expire，普通啟動仍無 SQL。
+- 400 recipient 分段 fanout 25、每 job 一人，沿原 identity/key/body/retry deadline；daily 保存 frozen plan、建立前再查過期。manual 先驗 fresh external receipt，回 202 queued；archived failed recovery 回明確 409，不能假排入成功。
+- Ragic 三份來源全部抓完才 apply，每次一筆＋checkpoint；同名 fail closed、只補缺欄、不刪既存。來源回滿 500 筆時拒絕不完整快照並顯示失敗；本輪正式只讀觀察為 31／435／435（當時點），並非無限資料容量承諾。
+- 報表採 owned subprocess 呼叫既有 Object Storage SDK，abort/deadline 必須 await child close；scoped mode 無 tmp fallback。報表穩定 key、正式 storage 合成內容寫入／獨立程序讀回另列收據，不等於真 LINE 發送驗收。
+- IT 治理顯示 intake、最近 wake、backlog／failed／unknown／missed／Ragic；readiness 專屬 readonly native session。有界 API 只回計數／靜態錯誤，不回來源名單／JWT／秘密；未驗證 wake 不做 app_log DB 寫入，平台僅記靜態 code。
+
+## 驗收與回退 gate
+
+沿用 EW-01～EW-12；local unit／真隔離 PG／source+compiled完整 HTTP／真 GitHub OIDC／正式發布／正式 oracle 分開收據。禁止用舊 258/PG30 或 HTTP200 代替本版驗收。真 LINE 試送不在範圍；400 人測試使用合成 HTTP fixture，正式只看未到期自然流程與 durable receipt。
+
+回退先關 repository variable／receiver，確認 in-flight owner；保留 job、recipient、key、payload、歷史，不回啟舊 unsafe entry、不清庫。正式 canary 未通過前不啟 active。實測／review blockers 未清前不得勾選 B05。
+
+---
+
 # B05-EW1：保留 Autoscale 的外部喚醒設計
 
 狀態：SPEC／待實作與啟用驗收，2026-10-17。使用者已選擇保留現址與 Autoscale；不取消發布、不改常駐 VM。既有 `notification-app.ts` 的隔離驗收不代表本方案已完成。

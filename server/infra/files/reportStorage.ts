@@ -43,10 +43,13 @@ import { promises as fs } from "fs";
 import path from "path";
 import type { Response } from "express";
 import { objectStorageClient } from "../../replit_integrations/object_storage/objectStorage";
+import { assertOperationActive, currentOperation, remainingOperationMs } from "../../shared/http/operationScope";
+import { boundedReportSubprocess, ReportStorageWriteError } from "./report-write-subprocess";
 
 const LEGACY_REPORT_DIR = "/tmp/weekly-push-reports";
 const OBJECT_PREFIX = "weekly-push-reports";
 const URI_SCHEME = "objstore://";
+const SCOPED_WRITE_RESERVE_MS = 1500;
 
 function safeRunId(runId: string): string {
   return runId.replace(/[^a-zA-Z0-9_-]/g, "");
@@ -115,6 +118,7 @@ async function writeToObjectStorage(
   runId: string,
   contents: string | Buffer,
   ext: "csv" | "xlsx",
+  timeoutMs?: number,
 ): Promise<string> {
   const safe = safeRunId(runId);
   const relativeKey = `${OBJECT_PREFIX}/${safe}.${ext}`;
@@ -129,20 +133,56 @@ async function writeToObjectStorage(
       contentType,
       resumable: false,
       metadata: { contentType },
+      ...(timeoutMs === undefined ? {} : { timeout: timeoutMs }),
     });
   return uri;
 }
 
+function requireDurableDirectory(): void {
+  const directory = getPrivateObjectDir();
+  if (!directory) throw new ReportStorageWriteError("report_storage_required");
+  if (!/^\/?[^/]+(?:\/[^/]+)*\/?$/.test(directory) || directory.includes("\\") ||
+    directory.split("/").some((part) => part === "." || part === "..")) {
+    throw new ReportStorageWriteError("report_storage_config_invalid");
+  }
+}
+
+/** Dedicated child-only durable call; no fallback or provider-error logging. */
+export async function writeDurableReportInChild(
+  runId: string, contents: Buffer, ext: "csv" | "xlsx", timeoutMs: number,
+): Promise<string> {
+  requireDurableDirectory();
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 30_000 ||
+    !/^[a-zA-Z0-9_-]{1,256}$/.test(runId) || !["csv", "xlsx"].includes(ext)) {
+    throw new ReportStorageWriteError("report_storage_request_invalid");
+  }
+  try { return await writeToObjectStorage(runId, contents, ext, timeoutMs); }
+  catch { throw new ReportStorageWriteError("report_storage_write_failed"); }
+}
+
 /**
  * Persists a generated report and returns the path/URI to store on
- * `weekly_push_runs.report_path`. Prefers Replit Object Storage; falls
- * back to /tmp only when PRIVATE_OBJECT_DIR is not configured.
+ * `weekly_push_runs.report_path`. Request-scoped calls require durable storage
+ * and await an owned SDK child's close boundary. Outside a request scope,
+ * preserve the existing Object Storage save and local fallback behavior.
  */
 export async function writeReport(
   runId: string,
   contents: string | Buffer,
   ext: "csv" | "xlsx" = "csv",
 ): Promise<string> {
+  const operation = currentOperation();
+  if (operation) {
+    assertOperationActive(SCOPED_WRITE_RESERVE_MS);
+    requireDurableDirectory();
+    const timeoutMs = Math.floor(remainingOperationMs(30_000, SCOPED_WRITE_RESERVE_MS));
+    const uri = await boundedReportSubprocess(
+      runId, contents, ext,
+      { signal: operation.signal, timeoutMs },
+    );
+    assertOperationActive();
+    return uri;
+  }
   if (getPrivateObjectDir()) {
     try {
       return await writeToObjectStorage(runId, contents, ext);

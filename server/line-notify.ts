@@ -2,6 +2,8 @@ import { featureFlags } from "./config/featureFlags";
 import { currentDb } from "./shared/dbContext";
 import { enqueueTextNotification , findSavedTextNotification } from "./modules/notification/delivery.service";
 import { notificationIdentity, sendDurableText } from "./modules/notification/delivery.service";
+import { buildDailyNotifications, enqueueDailyNotifications, parseDailyTargetDate, type DailyEnqueueOptions, type DailyNotificationPlan } from "./modules/notificationWake/daily-plan";
+import { notificationBatchMayContinue, type NotificationBatchControl } from "./modules/notificationWake/notification-batch";
 import { isRealCoachName } from "@shared/scheduleRules";
 import { storage } from './storage';
 import { format, addDays, startOfWeek, parseISO } from 'date-fns';
@@ -371,6 +373,24 @@ export async function sendFillReminderToCoaches(): Promise<{ sent: number }> {
 export async function setupDailyNotificationCron() {
   const { configureNotificationSchedules } = await import("./infra/queue/runtime");
   return configureNotificationSchedules({ enabled: true, kinds: ["daily"] });
+}
+
+/** The external due planner supplies this date; HTTP callers never select an arbitrary target. */
+export async function prepareDailyNotifications(targetDate: string, control: NotificationBatchControl = {}): Promise<DailyNotificationPlan> {
+  parseDailyTargetDate(targetDate);
+  if (!notificationBatchMayContinue(control)) throw new Error("daily_preparation_interrupted");
+  const targetSchedules = await storage.getSchedulesByDateRange(targetDate, targetDate);
+  if (!notificationBatchMayContinue(control)) throw new Error("daily_preparation_interrupted");
+  const approvedCoaches = targetSchedules.length ? await storage.getApprovedCoachUsers() : [];
+  if (!notificationBatchMayContinue(control)) throw new Error("daily_preparation_interrupted");
+  return buildDailyNotifications(targetDate, { schedules: targetSchedules, coaches: approvedCoaches,
+    portalUrl: coachPortalUrl(), notificationIdentity, isRealCoachName });
+}
+
+/** Persist the prepared plan in the parent job, then await one finite enqueue step per wake. */
+export async function enqueuePreparedDailyNotifications(plan: DailyNotificationPlan, options: DailyEnqueueOptions = {}) {
+  if (!options.dryRun && !process.env.LINE_CHANNEL_ACCESS_TOKEN) throw new Error("daily_line_token_not_configured");
+  return enqueueDailyNotifications(plan, { findSavedTextNotification, dailyLogAlreadyExists, enqueueTextNotification }, options);
 }
 
 export { sendWeeklyScheduleNotifications, sendDailyTomorrowNotifications };

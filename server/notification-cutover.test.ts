@@ -83,6 +83,8 @@ for (const code of ["weekly_push_legacy_history_blocked", "weekly_push_ambiguous
   const source = readFileSync(new URL("./modules/weeklyPush/weeklyPush.routes.ts", import.meta.url), "utf8");
   const module = { exports: {} as any }, handlers = new Map<string, Function>();
   const imports: Record<string, unknown> = {
+    "../notificationWake/wake-readiness": {externalWakeConfigured:()=>false},
+    "../notificationWake/wake-intake": {},
     zod: { z }, "../../shared/auth/adminPassword": { requireAdminPassword() {} },
     "./weeklyPush.repository": { weeklyPushRepo: {} },
     "./weeklyPush.service": { enqueueWeeklyPush: async () => { throw Error(code); } },
