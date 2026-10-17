@@ -276,7 +276,7 @@ function CoachSearchSelect({
 function CoachAssignmentContent() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  
+
   const initialLocation = useRef(readScheduleLocation(typeof window !== "undefined" ? window.location.search : ""));
   const locationRestoring = useRef(false), locationInitialized = useRef(false);
   const [selectedVenue, setSelectedVenue] = useState(initialLocation.current.venueId);
@@ -524,7 +524,7 @@ function CoachAssignmentContent() {
     },
   });
 
-  
+
 
   const schedulesByDateAndTime: Record<string, Record<string, (Schedule & { venue: Venue; timeSlot: TimeSlot })[]>> = {};
   schedules.map((row) => ({ ...row, ...assignmentDrafts[row.id] })).forEach((schedule) => {

@@ -19,7 +19,7 @@ export async function enqueueTextNotification(input: { notificationId: string; t
   const recipientId = textNotificationRecipientId(input.notificationId);
   const day = new Date().toISOString().slice(0, 10);
   const result = await weeklyPushRepo.createRunBundle({ id: runId, pushType: "notification", weekStartDate: day, weekEndDate: day,
-    triggerSource: "manual", destination: "notification", idempotencyKey: `notification:${input.notificationId}`, status: "queued", dryRun: false,
+    triggerSource: "manual", destination: `notification:${runId}`, idempotencyKey: `notification:${input.notificationId}`, status: "queued", dryRun: false,
   }, [{ id: recipientId, runId, recipientType: "notification", recipientName: "notification", lineUserId: input.to, status: "pending",
     deliveryKey: `notification:${input.notificationId}`, lineRetryKey: randomUUID(), payloadJson: { message: input.text },
   }], queues.notificationDelivery);

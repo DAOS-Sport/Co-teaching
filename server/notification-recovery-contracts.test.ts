@@ -5,11 +5,11 @@ import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 
-function load(relative: string, imports: Record<string, unknown>): any {
+function load(relative: string, imports: Record<string, unknown>, globals: Record<string, unknown> = {}): any {
   const source = readFileSync(new URL(relative, import.meta.url), "utf8");
   const module = { exports: {} };
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText,
-    { module, exports: module.exports, Date, Buffer, console: { log() {}, warn() {}, error() {} }, require(name: string) { assert.ok(name in imports, `unstubbed dependency ${name}`); return imports[name]; } }, { timeout: 5000 });
+    { module, exports: module.exports, Date, Buffer, console: { log() {}, warn() {}, error() {} }, require(name: string) { assert.ok(name in imports, `unstubbed dependency ${name}`); return imports[name]; }, ...globals }, { timeout: 5000 });
   return module.exports;
 }
 
@@ -166,4 +166,65 @@ test("restore rejects legacy arrays, invalid scopes and outside names before any
     await assert.rejects(f.runtime.restoreNotificationSchedules(bad, f.boss));
   }
   assert.equal(f.mutations(), 0);
+});
+
+function uniqueRunService() {
+  const runs = new Map<string, any>(), recipients = new Map<string, any>(), jobs = new Set<string>();
+  const byIdempotency = new Map<string, any>(), deliveryTuples = new Set<string>();
+  let clock = Date.UTC(2026, 9, 17, 12);
+  class TestDate extends Date {
+    constructor(value?: string | number | Date) { super(value === undefined ? clock : value instanceof Date ? value.getTime() : value); }
+    static now() { return clock; }
+  }
+  const repository = {
+    createRunBundle: async (run: any, rows: any[]) => {
+      // Model both actual DB unique indexes, instead of the old single-row mock.
+      const tuple = JSON.stringify([run.pushType, run.weekStartDate, run.destination, run.dryRun]);
+      if (runs.has(run.id) || byIdempotency.has(run.idempotencyKey) || deliveryTuples.has(tuple)) {
+        const existing = byIdempotency.get(run.idempotencyKey);
+        if (!existing || existing.id !== run.id) throw new Error("Run identity collision");
+        return { created: false, run: existing };
+      }
+      runs.set(run.id, { ...run }); byIdempotency.set(run.idempotencyKey, runs.get(run.id)); deliveryTuples.add(tuple);
+      for (const row of rows) recipients.set(row.id, { ...row, payloadJson: { ...row.payloadJson, fixedDelivery: { notificationId: row.id, to: row.lineUserId, text: row.payloadJson.message, retryKey: row.lineRetryKey } } });
+      jobs.add(run.id);
+      return { created: true, run: runs.get(run.id) };
+    },
+    getRecipientById: async (id: string) => recipients.get(id),
+  };
+  const service = load("./modules/notification/delivery.service.ts", {
+    "../../config/featureFlags": { featureFlags: { enableWeeklyPushQueue: true } }, "node:crypto": crypto,
+    "../weeklyPush/weeklyPush.repository": { weeklyPushRepo: repository }, "../../infra/queue/queues": { queues: { notificationDelivery: "synthetic-delivery" } },
+    "./delivery.repository": {}, "./lineNotify.adapter": {}, "../../core/notifications/delivery": {},
+  }, { Date: TestDate });
+  return { service, runs, recipients, jobs, nextDay: () => { clock += 86_400_000; } };
+}
+
+test("generic run identity partitions the actual delivery unique tuple for two same-day notifications", async () => {
+  const f = uniqueRunService(), firstInput = { notificationId: "synthetic-operation-a", to: "synthetic-destination-a", text: "synthetic-first-body" };
+  const first = await f.service.enqueueTextNotification(firstInput);
+  const original = f.recipients.get(first.notificationId), originalKey = original.lineRetryKey;
+  const second = await f.service.enqueueTextNotification({ notificationId: "synthetic-operation-b", to: "synthetic-destination-b", text: "synthetic-second-body" });
+  assert.notEqual(first.runId, second.runId); assert.notEqual(first.notificationId, second.notificationId);
+  assert.equal(f.runs.size, 2); assert.equal(f.recipients.size, 2); assert.equal(f.jobs.size, 2);
+  assert.notEqual(f.runs.get(first.runId).destination, f.runs.get(second.runId).destination);
+  const replay = await f.service.enqueueTextNotification(firstInput);
+  assert.equal(replay.runId, first.runId); assert.equal(replay.notificationId, first.notificationId); assert.equal(replay.reused, true);
+  assert.equal(f.recipients.get(first.notificationId).lineRetryKey, originalKey);
+  await assert.rejects(f.service.enqueueTextNotification({ ...firstInput, text: "changed-body" }));
+  await assert.rejects(f.service.enqueueTextNotification({ ...firstInput, to: "changed-destination", reuseSavedPayload: true }));
+  assert.equal(f.runs.size, 2); assert.equal(f.recipients.size, 2); assert.equal(f.jobs.size, 2);
+});
+
+test("same generic identity across dates reuses its first run, payload and key", async () => {
+  const f = uniqueRunService(), input = { notificationId: "synthetic-cross-day", to: "synthetic-destination", text: "synthetic-original" };
+  const first = await f.service.enqueueTextNotification(input), original = f.recipients.get(first.notificationId);
+  const day = f.runs.get(first.runId).weekStartDate, key = original.lineRetryKey;
+  f.nextDay();
+  const replay = await f.service.enqueueTextNotification({ ...input, text: "synthetic-edited", reuseSavedPayload: true });
+  assert.equal(replay.runId, first.runId); assert.equal(replay.notificationId, first.notificationId);
+  assert.equal(f.runs.size, 1); assert.equal(f.recipients.size, 1); assert.equal(f.jobs.size, 1);
+  assert.equal(f.runs.get(first.runId).weekStartDate, day);
+  assert.equal(f.recipients.get(first.notificationId).lineRetryKey, key);
+  assert.equal(f.recipients.get(first.notificationId).payloadJson.fixedDelivery.text, input.text);
 });

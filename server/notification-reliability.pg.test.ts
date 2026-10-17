@@ -16,7 +16,7 @@ test("N3 real PostgreSQL atomic jobs, claims, and accepted-before-mark crash", a
   const require = createRequire(import.meta.url);
   const { Pool } = require("pg");
   const { drizzle } = await import("drizzle-orm/node-postgres");
-  const { eq } = await import("drizzle-orm");
+  const { eq , inArray} = await import("drizzle-orm");
   const schema = await import("../shared/schema");
   const pool = new Pool({ connectionString: url, max: 4 });
   const context = await import("./shared/dbContext");
@@ -32,7 +32,7 @@ test("N3 real PostgreSQL atomic jobs, claims, and accepted-before-mark crash", a
   setQueueProducerForTest(producer);
   const bundle = (id: string, queue = "notification-delivery") => weeklyPushRepo.createRunBundle({
     id, pushType: "notification", weekStartDate: "2030-01-07", weekEndDate: "2030-01-13", triggerSource: "manual",
-    destination: "fixture", idempotencyKey: `n3:${id}`, status: "queued", dryRun: false,
+    destination: `fixture:${id}`, idempotencyKey: `n3:${id}`, status: "queued", dryRun: false,
   }, [{ id: randomUUID(), runId: id, recipientType: "notification", recipientName: "fixture", lineUserId: "fixture-recipient",
     status: "pending", deliveryKey: `n3:${id}`, lineRetryKey: randomUUID(), payloadJson: { message: "fixture-message" },
   }], queue);
@@ -91,6 +91,56 @@ test("N3 real PostgreSQL atomic jobs, claims, and accepted-before-mark crash", a
       assert.equal((await deliverNotification(recipient.id, deps)).state, "unclaimed");
       await assert.rejects(notificationDeliveryStore.complete(claim, { state: "failed", nextRetryAt: null,
         result: { outcome: "rejected", status: 400, errorCode: "fixture", errorMessage: "fixture" } }, clock), /superseded/);
+    });
+
+    await t.test("same-day generic identities each persist run recipient and job; replay is immutable", async () => {
+      const { enqueueTextNotification } = await import("./modules/notification/delivery.service");
+      const suffix = randomUUID();
+      const input = { notificationId: `r11-first-${suffix}`, to: "synthetic-first-destination", text: "synthetic-first-body" };
+      const first = await enqueueTextNotification(input);
+      const firstRecipient = await weeklyPushRepo.getRecipientById(first.notificationId);
+      assert.ok(firstRecipient);
+      const firstKey = firstRecipient.lineRetryKey;
+      const firstPayload = firstRecipient.payloadJson;
+      const second = await enqueueTextNotification({ notificationId: `r11-second-${suffix}`, to: "synthetic-second-destination", text: "synthetic-second-body" });
+      assert.notEqual(first.runId, second.runId);
+      assert.notEqual(first.notificationId, second.notificationId);
+      const runIds = [first.runId, second.runId];
+      const rows = await db.select().from(schema.weeklyPushRuns).where(inArray(schema.weeklyPushRuns.id, runIds));
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0].weekStartDate, rows[1].weekStartDate, "both generic operations are for the same day");
+      assert.equal(new Set(rows.map(row => row.destination)).size, 2, "delivery tuple partitions distinct notification identities");
+      assert.equal((await db.select().from(schema.weeklyPushRecipients).where(inArray(schema.weeklyPushRecipients.runId, runIds))).length, 2);
+      const jobs = await pool.query("SELECT id, data FROM pgboss.job WHERE id = ANY($1::uuid[])", [runIds]);
+      assert.equal(jobs.rowCount, 2);
+      assert.deepEqual(jobs.rows.map(row => row.data.runId).sort(), [...runIds].sort());
+
+      const replay = await enqueueTextNotification(input);
+      assert.equal(replay.reused, true);
+      assert.equal(replay.runId, first.runId);
+      assert.equal(replay.notificationId, first.notificationId);
+      await assert.rejects(enqueueTextNotification({ ...input, text: "changed-body" }));
+      await assert.rejects(enqueueTextNotification({ ...input, to: "changed-destination", reuseSavedPayload: true }));
+      const validAfterRejectedChanges = await enqueueTextNotification(input);
+      assert.equal(validAfterRejectedChanges.runId, first.runId, "valid replay remains healthy after both mutation rejections");
+
+      // Persist the first operation as yesterday's record, then enqueue the same identity today.
+      const originalDay = rows.find(row => row.id === first.runId)!.weekStartDate;
+      const priorDay = new Date(`${originalDay}T00:00:00.000Z`);
+      priorDay.setUTCDate(priorDay.getUTCDate() - 1);
+      const yesterday = priorDay.toISOString().slice(0, 10);
+      await db.update(schema.weeklyPushRuns).set({ weekStartDate: yesterday, weekEndDate: yesterday }).where(eq(schema.weeklyPushRuns.id, first.runId));
+      const nextDayReplay = await enqueueTextNotification(input);
+      assert.equal(nextDayReplay.reused, true);
+      assert.equal(nextDayReplay.runId, first.runId);
+      assert.equal(nextDayReplay.notificationId, first.notificationId);
+      assert.equal((await weeklyPushRepo.getRunById(first.runId))?.weekStartDate, yesterday, "same identity retains the first run's persisted day");
+      const after = await weeklyPushRepo.getRecipientById(first.notificationId);
+      assert.equal(after?.lineRetryKey, firstKey);
+      assert.deepEqual(after?.payloadJson, firstPayload);
+      assert.equal((await db.select().from(schema.weeklyPushRuns).where(inArray(schema.weeklyPushRuns.id, runIds))).length, 2);
+      assert.equal((await db.select().from(schema.weeklyPushRecipients).where(inArray(schema.weeklyPushRecipients.runId, runIds))).length, 2);
+      assert.equal((await pool.query("SELECT id FROM pgboss.job WHERE id = ANY($1::uuid[])", [runIds])).rowCount, 2);
     });
   } finally {
     setQueueProducerForTest(null);

@@ -8,6 +8,7 @@ const parsed = new URL(target);
 if (parsed.hostname !== "127.0.0.1" || !/^\/ct_ca3_[a-z0-9_]+$/.test(parsed.pathname) || !parsed.port || parsed.port === "5432") throw new Error("Refusing non-disposable target");
 process.env.DATABASE_URL = "postgres://unused:unused@127.0.0.1:1/isolated";
 process.env.ADMIN_PASSWORD = "synthetic-ca3-admin";
+process.env.REPLIT_DOMAINS = "isolated.invalid";
 
 test("CA3 actual HTTP batch/create contracts and PostgreSQL integrity", { timeout: 90_000 }, async t => {
   const pg = (await import("pg")).default;

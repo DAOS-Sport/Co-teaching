@@ -132,7 +132,7 @@ function ScheduleTextImportDialog({ open, onOpenChange, venueId, venueName, admi
 function VenueScheduleEditContent() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  
+
   const initialLocation = useRef(readScheduleLocation(typeof window !== "undefined" ? window.location.search : ""));
   const locationRestoring = useRef(false), locationInitialized = useRef(false);
   const [selectedVenue, setSelectedVenue] = useState(initialLocation.current.venueId);
@@ -237,7 +237,7 @@ function VenueScheduleEditContent() {
       setCellSaveState((state) => ({ ...state, [key]: "saved" }));
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).includes("/api/schedules") });
       queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).includes("/api/statistics") });
-      
+
     } catch (error) {
       setCellSaveState((state) => ({ ...state, [key]: failedSaveState(error) }));
       toast({ title: "儲存失敗", description: error instanceof Error ? error.message : "未知錯誤", variant: "destructive" });

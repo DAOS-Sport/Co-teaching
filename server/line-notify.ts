@@ -281,7 +281,7 @@ async function sendDailyTomorrowNotifications(): Promise<void> {
 
       // 6b'. 應用層快路徑：若已有當日記錄，直接跳過，省下訊息組裝與 INSERT
       //      （DB unique index 仍是最終事實來源，下面的 ON CONFLICT 才是真正的鎖）
-      
+
 
       // 6c. 組訊息
       let message = `📋 明日課程提醒\n`;
@@ -326,11 +326,11 @@ async function sendDailyTomorrowNotifications(): Promise<void> {
       console.log(`[LINE Notify] No LINE ID: ${noLineIdCoaches.join(', ')}`);
     }
     console.log(`[LINE Notify] Daily done. Date=${tomorrowStr} Sent=${sentCount} SkipDup=${skipDupCount} Failed=${failCount} NoLineId=${noLineIdCoaches.length}`);
-  
+
     if (failCount > 0) throw new Error("daily_notifications_incomplete_or_unknown");
   } catch (error) {
     console.error('[LINE Notify] Error sending daily notifications:', error);
-  
+
     throw error;
   }
 }

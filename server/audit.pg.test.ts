@@ -48,7 +48,7 @@ test("audit row and business write commit or roll back together on PostgreSQL", 
     assert.ok(copyForAudit, "Copy observation must be configured before failure injection");
     const pending = await currentDb().execute(sql`SELECT count(*)::int AS n FROM schedules WHERE venue_id=${copyForAudit!.venueId} AND date>=${copyForAudit!.targetStartDate}::date AND date<(${copyForAudit!.targetStartDate}::date + INTERVAL '7 days')`);
     observedPendingCopy.push(Number(pending.rows[0].n));
-    try { 
+    try {
     await currentDb().execute(sql`insert into operation_audit (actor, action, entity, entity_id) values (null, 'x', 'x', 'x')`);
    assert.fail("Original audit SQL must fail"); }
     catch (error) {

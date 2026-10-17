@@ -43,6 +43,8 @@ copy 來源範圍最多 7 天、日期嚴格有效、不可與目標週重疊。
 
 accepted 只代表 LINE 平台受理，沒有送達證據。409 需 accepted-request header；timeout/5xx 為接受結果 unknown，可在原 key 的 24 小時及嘗試上限內重試，之後保持 unknown，不換 key 猜送。claim lease 與 fencing 阻止舊 worker 覆寫新結果。
 
+一般通知的 destination 以固定 notification identity 分區，符合既有 run 唯一索引；同日不同通知各自建立 run/job，不以共用 destination 互相阻擋。
+
 daily 依目標日期＋既有帳號 ID 固定 identity；恢復時沿用首 payload/key，不以新課表內容更換重試身份。舊 daily log 可能在外發前建立：存在 log 卻無 durable record 時，標 `unknown/legacy_untracked` 並交人工核對。姓名多重匹配不得任選第一人，不自動合併人員。摘要依穩定結果版本區分新業務通知，同一結果的重試仍沿用首 payload/key。
 
 週推播主 job、recipient-only 重試與 reconcile 共用 finalization；report／summary 出錯不能假裝完成，已 accepted 的 recipient 不重送。daily legacy log 只在 accepted 後寫入；沒有 durable record 的舊 log 保持 unknown。Healthchecks 週監控只由 weekly 任務回報，一般通知不能替週推播報成功。清理與停止 worker 失敗必須向上回報，不能假稱已清理／停止。
