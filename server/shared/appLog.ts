@@ -98,7 +98,9 @@ export function routeTemplate(req: Request): string {
 }
 
 // The IT page polls these; logging their own refusals would fill the log.
-const NOT_LOGGED = (route: string) => route.startsWith("/api/admin/it") || route === "/api/internal/notification-wake";
+const NOT_LOGGED = (route: string, status: number) => route.startsWith("/api/admin/it")
+  || route === "/api/internal/notification-wake"
+  || (route === "/api/admin/weekly-push/readiness" && status === 503);
 
 /** Records every /api response with status >= 400 after it is sent. */
 export function apiLogMiddleware(req: Request, res: Response, next: NextFunction): void {
@@ -109,7 +111,7 @@ export function apiLogMiddleware(req: Request, res: Response, next: NextFunction
     const level = levelForStatus(res.statusCode);
     if (!level) return;
     const route = routeTemplate(req);
-    if (NOT_LOGGED(route)) return;
+    if (NOT_LOGGED(route, res.statusCode)) return;
     recordAppLog({
       level,
       source: "api",

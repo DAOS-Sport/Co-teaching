@@ -17,6 +17,12 @@
 - 報表採 owned subprocess 呼叫既有 Object Storage SDK，abort/deadline 必須 await child close；scoped mode 無 tmp fallback。報表穩定 key、正式 storage 合成內容寫入／獨立程序讀回另列收據，不等於真 LINE 發送驗收。
 - IT 治理顯示 intake、最近 wake、backlog／failed／unknown／missed／Ragic；readiness 專屬 readonly native session。有界 API 只回計數／靜態錯誤，不回來源名單／JWT／秘密；未驗證 wake 不做 app_log DB 寫入，平台僅記靜態 code。
 
+## 正式 canary 補充（2026-10-17）
+
+PA.1 已依精確補充批准完成 Preview 結構與六筆歷史 dry-run 新欄 metadata 對齊，原欄及歷史保留。首輪同址 Autoscale canary 已用真 GitHub 短效 OIDC／原生正式 PostgreSQL 完成，40 張現有資料表與 sequence 前後一致；這不是 active 切換完成。
+
+D-EW2-04：正式健康輪詢的預期 503 曾產生一筆 HTTP_503 操作日誌，該筆保留。僅精確 `GET` 路由模板 `/api/admin/weekly-push/readiness` 的 503 不寫自身日誌；意外 500／401 與其他路由錯誤照常記錄。保留兩輪 RED 與獨立真 Express 反例；修補版仍需同版建置與發布核對。
+
 ## 驗收與回退 gate
 
 沿用 EW-01～EW-12；local unit／真隔離 PG／source+compiled完整 HTTP／真 GitHub OIDC／正式發布／正式 oracle 分開收據。禁止用舊 258/PG30 或 HTTP200 代替本版驗收。真 LINE 試送不在範圍；400 人測試使用合成 HTTP fixture，正式只看未到期自然流程與 durable receipt。

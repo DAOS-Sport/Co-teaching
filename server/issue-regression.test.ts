@@ -330,6 +330,60 @@ test("#1 Ragic sync keeps failed items, refuses to merge same-name rows and repo
   }
 });
 
+test("API readiness polling 503 never queues logs while other errors and similar-route 503s still write", async () => {
+  const express = (await import("express")).default;
+  const { apiLogMiddleware, setAppLogWriterForTest, flushAppLogForTest, appLogQueueStats } = await import("./shared/appLog");
+  const rows: { level: string; route?: string | null; status?: number | null }[] = [];
+  let writes = 0;
+  setAppLogWriterForTest(async (entries) => { writes++; rows.push(...entries); });
+  const app = express();
+  app.use(apiLogMiddleware);
+  let readinessStatus = 503;
+  app.get("/api/admin/weekly-push/readiness", (_req, res) => { res.status(readinessStatus).json({ code: "NOT_READY" }); });
+  for (const route of ["/api/ordinary-service",
+    "/api/admin/weekly-push/readiness-extra", "/api/admin/weekly-push/readiness/details"]) {
+    app.get(route, (_req, res) => { res.status(503).json({ code: "NOT_READY" }); });
+  }
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  try {
+    for (let poll = 0; poll < 3; poll++) {
+      assert.equal((await fetch(`${url}/api/admin/weekly-push/readiness?poll=${poll}`)).status, 503);
+      await flushAppLogForTest();
+      assert.equal(writes, 0, "expected readiness 503 must not invoke the log writer");
+      assert.deepEqual(appLogQueueStats(), { pending: 0, activeWrites: 0, dropped: 0 });
+    }
+    for (const status of [500, 401]) {
+      readinessStatus = status;
+      assert.equal((await fetch(`${url}/api/admin/weekly-push/readiness`)).status, status);
+    }
+    await flushAppLogForTest();
+    assert.deepEqual(rows.map((row) => [row.level, row.route, row.status]), [
+      ["error", "/api/admin/weekly-push/readiness", 500],
+      ["warn", "/api/admin/weekly-push/readiness", 401],
+    ], "unexpected readiness failures and authorization refusals must remain observable");
+    for (const route of ["/api/ordinary-service", "/api/admin/weekly-push/readiness-extra",
+      "/api/admin/weekly-push/readiness/details"]) {
+      assert.equal((await fetch(url + route)).status, 503);
+    }
+    await flushAppLogForTest();
+    assert.deepEqual(rows.map((row) => [row.level, row.route, row.status]), [
+      ["error", "/api/admin/weekly-push/readiness", 500],
+      ["warn", "/api/admin/weekly-push/readiness", 401],
+      ["error", "/api/ordinary-service", 503],
+      ["error", "/api/admin/weekly-push/readiness-extra", 503],
+      ["error", "/api/admin/weekly-push/readiness/details", 503],
+    ]);
+    assert.equal(writes, 5);
+  } finally {
+    await flushAppLogForTest();
+    setAppLogWriterForTest(async () => {});
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+  }
+});
+
 test("API log keeps route templates only, splits errors from refusals, skips the IT page and never blocks", async () => {
   const express = (await import("express")).default;
   const { apiLogMiddleware, setAppLogWriterForTest, flushAppLogForTest, appLogQueueStats, recordAppLog, UNMATCHED_ROUTE } = await import("./shared/appLog");
