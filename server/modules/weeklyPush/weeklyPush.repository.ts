@@ -10,12 +10,13 @@ import { prepareSavedDelivery } from "../notification/delivery.repository";
  * Drizzle calls. Per the architecture rules from Task #22, routes
  * never touch the DB directly.
  */
-import { and, desc, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, lt, lte, sql } from "drizzle-orm";
 import { txDb as db } from "../../shared/dbContext";
 import {
   weeklyPushRuns,
   weeklyPushRecipients,
   weeklyPushOutbox,
+  lineNotifyLogs,
   type WeeklyPushRun,
   type WeeklyPushRecipient,
   type InsertWeeklyPushRun,
@@ -82,6 +83,15 @@ export const weeklyPushRepo = {
       .where(eq(weeklyPushRuns.idempotencyKey, key))
       .limit(1);
     return row ?? null;
+  },
+
+  async hasLegacyWeeklyLogsInWindow(startDate: string, endDate: string): Promise<boolean> {
+    const [row] = await db.select({ id: lineNotifyLogs.id }).from(lineNotifyLogs).where(and(
+      eq(lineNotifyLogs.notifyType, "weekly"),
+      gte(lineNotifyLogs.scheduleDate, startDate),
+      lte(lineNotifyLogs.scheduleDate, endDate),
+    )).limit(1);
+    return Boolean(row);
   },
 
   async getRunById(id: string): Promise<WeeklyPushRun | null> {

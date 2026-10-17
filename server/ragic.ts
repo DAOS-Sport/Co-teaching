@@ -508,7 +508,14 @@ export function setupRagicSyncCron() {
 
   // Taiwan has no DST, so 03:00 Asia/Taipei is the same instant as the
   // old "0 19 * * *" in server-local UTC — just written the way it reads.
-  cron.schedule(
+  startRagicDailySchedule();
+
+  console.log(`[Ragic] daily sync scheduled 03:00 Asia/Taipei; boot sync in ${BOOT_SYNC_DELAY_MS / 1000}s`);
+}
+
+/** Explicit operational entry: preserves the daily job without boot-time writes. */
+export function startRagicDailySchedule() {
+  return cron.schedule(
     "0 3 * * *",
     () => {
       console.log("[Ragic] daily sync triggered (03:00 Asia/Taipei)");
@@ -519,5 +526,4 @@ export function setupRagicSyncCron() {
     { timezone: "Asia/Taipei" },
   );
 
-  console.log(`[Ragic] daily sync scheduled 03:00 Asia/Taipei; boot sync in ${BOOT_SYNC_DELAY_MS / 1000}s`);
 }

@@ -142,6 +142,17 @@ export async function buildRecipientsForWeek(
     weekEndDate,
   );
 
+  const scheduledNames = new Set(weekSchedules.flatMap((s) => [s.coachName, s.coachName2]));
+  const accountsByName = new Map<string, Set<string>>();
+  for (const coach of coachesWithLine) {
+    const name = (coach.linkedCoachName || coach.name)!;
+    if (!isRealCoachName(name) || !scheduledNames.has(name)) continue;
+    const accounts = accountsByName.get(name) ?? new Set<string>();
+    accounts.add(coach.id);
+    if (accounts.size > 1) throw new Error("weekly_push_ambiguous_scheduled_coach");
+    accountsByName.set(name, accounts);
+  }
+
   const out: BuiltRecipient[] = [];
   for (const coach of coachesWithLine) {
     const coachName = (coach.linkedCoachName || coach.name)!;
@@ -218,8 +229,13 @@ export async function enqueueWeeklyPush(
     return { run: existing, reused: true, recipientsCreated: 0 };
   }
 
-  const runId = randomUUID();
+  // Legacy logs cannot prove an accepted request identity. Never mint a new one
+  // over that history; durable replays above still retain their original key.
+  if (!dryRun && await weeklyPushRepo.hasLegacyWeeklyLogsInWindow(weekStartDate, weekEndDate)) {
+    throw new Error("weekly_push_legacy_history_blocked");
+  }
   const built = await buildRecipientsForWeek(weekStartDate, weekEndDate);
+  const runId = randomUUID();
   const recipientRows: InsertWeeklyPushRecipient[] = built.map((b) => ({
     runId,
     recipientType: "coach",

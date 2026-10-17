@@ -5,14 +5,16 @@
   "license": "MIT",
   "scripts": {
     "dev": "NODE_ENV=development tsx server/index.ts",
-    "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
+    "dev:notifications": "NODE_ENV=development tsx server/notification-app.ts",
+    "build": "vite build && esbuild server/index.ts server/notification-app.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
     "start": "NODE_ENV=production node dist/index.js",
+    "start:notifications": "NODE_ENV=production node dist/notification-app.js",
     "mcp:claude": "tsx server/mcp/claudeWorkspaceMcp.mjs",
     "check": "tsc",
-    "test": "node --import tsx --test shared/scheduleImport.test.ts shared/scheduleRules.test.ts client/src/utils/special-workdays.test.ts server/shared/auth/teacherTokenCodec.test.ts server/ragic.test.ts server/issue-regression.test.ts server/mcp/schedulingTools.test.ts server/core-scheduling.test.ts server/adapters/services/schedule-confirmation.test.ts server/clean-architecture.test.ts server/startup-safety.test.ts server/client-contracts.test.ts server/batch-plan.test.ts server/batch-confirmation.test.ts server/legacy-import-retirement.test.ts server/notification-reliability.test.ts client/src/lib/schedule-ui.test.ts server/weekly-push-healthchecks.test.ts server/notification-runtime-lifecycle.test.ts server/notification-recovery-contracts.test.ts",
+    "test": "node --import tsx --test shared/scheduleImport.test.ts shared/scheduleRules.test.ts client/src/utils/special-workdays.test.ts server/shared/auth/teacherTokenCodec.test.ts server/ragic.test.ts server/issue-regression.test.ts server/mcp/schedulingTools.test.ts server/core-scheduling.test.ts server/adapters/services/schedule-confirmation.test.ts server/clean-architecture.test.ts server/startup-safety.test.ts server/client-contracts.test.ts server/batch-plan.test.ts server/batch-confirmation.test.ts server/legacy-import-retirement.test.ts server/notification-reliability.test.ts client/src/lib/schedule-ui.test.ts server/weekly-push-healthchecks.test.ts server/notification-runtime-lifecycle.test.ts server/notification-recovery-contracts.test.ts server/notification-cutover.test.ts server/notification-cutover-parity.test.ts",
     "db:push": "drizzle-kit push",
     "check:architecture": "node tools/check-clean-boundaries.mjs",
-    "test:pg": "node --import tsx --test --test-concurrency=1 server/scheduling-core.pg.test.ts server/audit.pg.test.ts server/schedule-batch.pg.test.ts server/notification-reliability.pg.test.ts server/notification-lifecycle.pg.test.ts server/school-boundary.pg.test.ts server/scheduling-mcp.pg.test.ts",
+    "test:pg": "node --import tsx --test --test-concurrency=1 server/scheduling-core.pg.test.ts server/audit.pg.test.ts server/schedule-batch.pg.test.ts server/notification-reliability.pg.test.ts server/notification-lifecycle.pg.test.ts server/school-boundary.pg.test.ts server/scheduling-mcp.pg.test.ts server/notification-cutover.pg.test.ts server/notification-cutover-parity.pg.test.ts",
     "check:client-contracts": "node tools/check-client-contracts.mjs"
   },
   "dependencies": {

@@ -131,12 +131,21 @@ test("actual report handler propagates storage failure to pg-boss retry", async 
   await assert.rejects(f.report(jobs), /synthetic-private-report-error/);
 });
 
-test("actual dry run still monitors one final completion without recipient HTTP", async () => {
+test("actual dry run creates a report without recipient/summary HTTP or production watchdog", async () => {
   const f = fixture({ dryRun: true, counts: { success: 0, skipped: 1 } });
   await f.weekly(jobs);
   assert.equal(f.events.includes("recipient:attempt"), false);
-  assert.equal(f.events.filter((event) => event === "monitor:start").length, 1);
-  assert.equal(f.events.filter((event) => event === "monitor:success").length, 1);
+  assert.equal(f.events.includes("report"), true);
+  assert.equal(f.events.includes("summary:accepted"), false);
+  assert.equal(f.events.some((event) => event.startsWith("monitor:")), false);
+});
+
+test("dry run report failure does not reactivate the production watchdog fallback", async () => {
+  const f = fixture({ dryRun: true, reportError: true, counts: { success: 0, skipped: 1 } });
+  await assert.rejects(f.weekly(jobs), /synthetic-private-report-error/);
+  assert.equal(f.events.includes("recipient:attempt"), false);
+  assert.equal(f.events.includes("summary:accepted"), false);
+  assert.equal(f.events.some((event) => event.startsWith("monitor:")), false);
 });
 
 for (const status of ["unknown", "failed", "not_configured"] as const) {

@@ -34,6 +34,8 @@ function buildBoss(): PgBoss {
     retryBackoff: true,
     // Auto-clean completed/failed jobs after a week so the table doesn't grow unbounded.
     archiveCompletedAfterSeconds: 60 * 60 * 24 * 7,
+    archiveFailedAfterSeconds: 60 * 60 * 24 * 7,
+    deleteAfterDays: 7,
   });
 }
 

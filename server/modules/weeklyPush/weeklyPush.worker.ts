@@ -29,7 +29,7 @@ export async function finalizeWeeklyPushRun(run: Run, counts: Counts, options: {
     ? (counts.success > 0 ? "partial_success" : "failed") : "success";
   const totals = { totalCount: counts.total, successCount: counts.success, failureCount: counts.failed, skippedCount: counts.skipped };
   let failureStatus: "failed" | "unknown" = "failed";
-  const monitor = run.pushType === "weekly" && options.monitor !== false;
+  const monitor = run.pushType === "weekly" && !run.dryRun && options.monitor !== false;
   if (monitor) await pingStart();
   try {
     const preparing = await weeklyPushRepo.updateRun(run.id, { ...totals, status: "sending", completedAt: null, errorMessage: null });
@@ -39,7 +39,7 @@ export async function finalizeWeeklyPushRun(run: Run, counts: Counts, options: {
       ...totals, status, completedAt: new Date(),
       errorMessage: counts.unknown > 0 ? "Platform acceptance could not be confirmed." : null,
     } satisfies Parameters<typeof weeklyPushRepo.updateRun>[1];
-    if (run.pushType === "weekly") {
+    if (run.pushType === "weekly" && !run.dryRun) {
       const summary = await pushRunSummary({ run: { ...preparing, ...finalPatch }, recipients: await weeklyPushRepo.listRecipientsByRun(run.id) });
       if (summary.configuredCount > 0 && summary.status !== "accepted") {
         failureStatus = summary.status === "unknown" ? "unknown" : "failed";
@@ -66,11 +66,11 @@ export async function finalizeWeeklyPushRun(run: Run, counts: Counts, options: {
 
 export async function handleWeeklyPushJob(jobs: PgBoss.Job<WeeklyPushJobData>[]) {
   for (const job of jobs) {
-    let monitor = false;
+    let monitor: boolean | undefined;
     try {
       const run = await weeklyPushRepo.getRunById(job.data.runId);
       if (!run) throw new Error("weekly_push_run_not_found");
-      monitor = run.pushType === "weekly";
+      monitor = run.pushType === "weekly" && !run.dryRun;
       if (monitor) await pingStart();
       await weeklyPushRepo.updateRun(run.id, { status: "sending", startedAt: run.startedAt ?? new Date(), completedAt: null });
       const recipients = await weeklyPushRepo.listRecipientsByRun(run.id);
@@ -95,7 +95,7 @@ export async function handleWeeklyPushJob(jobs: PgBoss.Job<WeeklyPushJobData>[])
         else await pingFail(WEEKLY_PUSH_MONITOR_INCOMPLETE);
       }
     } catch (error) {
-      if (!monitor && job.name === queues.weeklyPush) { monitor = true; await pingStart(); }
+      if (monitor === undefined && job.name === queues.weeklyPush) { monitor = true; await pingStart(); }
       if (monitor) await pingFail(WEEKLY_PUSH_MONITOR_FAILURE);
       throw error;
     }
@@ -104,16 +104,20 @@ export async function handleWeeklyPushJob(jobs: PgBoss.Job<WeeklyPushJobData>[])
 
 export async function handleRecipientJob(jobs: PgBoss.Job<WeeklyPushRecipientJobData>[]) {
   for (const job of jobs) {
-    const result = await deliverSavedRecipient(job.data.recipientId);
-    if (result.retry) throw new Error("Saved delivery remains retryable with its original LINE key");
-    if (result.state === "unclaimed") {
-      const row = await weeklyPushRepo.getRecipientById(job.data.recipientId);
-      if (row && (["pending", "processing", "sending", "retry_wait"].includes(row.status) || (row.status === "unknown" && row.nextRetryAt))) {
-        throw new Error("Saved delivery is not ready; retain the existing retry identity");
-      }
-    }
     const run = await weeklyPushRepo.getRunById(job.data.runId);
     if (!run) throw new Error("weekly_push_run_not_found");
+    if (run.dryRun) {
+      await weeklyPushRepo.updateRecipient(job.data.recipientId, { status: "skipped", completedAt: new Date() });
+    } else {
+      const result = await deliverSavedRecipient(job.data.recipientId);
+      if (result.retry) throw new Error("Saved delivery remains retryable with its original LINE key");
+      if (result.state === "unclaimed") {
+        const row = await weeklyPushRepo.getRecipientById(job.data.recipientId);
+        if (row && (["pending", "processing", "sending", "retry_wait"].includes(row.status) || (row.status === "unknown" && row.nextRetryAt))) {
+          throw new Error("Saved delivery is not ready; retain the existing retry identity");
+        }
+      }
+    }
     const counts = await weeklyPushRepo.countRecipientStatuses(run.id);
     const recipients = await weeklyPushRepo.listRecipientsByRun(run.id);
     if (counts.pending + counts.sending + counts.retryWait === 0 && !recipients.some(row => row.status === "unknown" && row.nextRetryAt)) {

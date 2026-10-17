@@ -96,6 +96,13 @@ export function registerWeeklyPushRoutes(app: Express): void {
           run: result.run,
         });
       } catch (err) {
+        const code = err instanceof Error ? err.message : "";
+        if (code === "weekly_push_legacy_history_blocked") {
+          return res.status(409).json({ code, message: "此週有舊版通知紀錄，請先核對；系統已停止重送。" });
+        }
+        if (code === "weekly_push_ambiguous_scheduled_coach") {
+          return res.status(409).json({ code, message: "有課教練對應到多個同名帳號，請先確認人員；系統已停止發送。" });
+        }
         console.error("[weeklyPush.routes] enqueue error", err);
         return res.status(500).json({
           message: "週推播排程失敗",

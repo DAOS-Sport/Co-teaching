@@ -77,6 +77,10 @@ function formatSummaryMessage(
  * the per-group dispatch outcome for diagnostic logging.
  */
 export async function pushRunSummary(params: SummaryParams) {
+  if (params.run.dryRun) {
+    return { itPushed: false, xiePushed: false, states: { it: "skipped", xie: "skipped" },
+      status: "skipped", configuredCount: 0, resultVersion: null, skippedReason: "dry_run" } as const;
+  }
   const origin = params.publicOrigin ?? env.publicOrigin;
   const text = formatSummaryMessage(params.run, params.recipients, origin);
   const resultVersion = notificationIdentity("weekly-summary-result", [params.run.status, params.run.totalCount, params.run.successCount,
