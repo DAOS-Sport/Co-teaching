@@ -53,7 +53,7 @@ export type ScheduleUpdateFields = Partial<{
   date: string;
   venueId: string;
   timeSlotId: string;
-  className: string;
+  className: string | null;
   coachName: string | null;
   coachName2: string | null;
   coachCount: number;

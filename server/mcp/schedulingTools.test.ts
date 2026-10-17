@@ -8,6 +8,8 @@ const { db } = await import("../db");
 // #3: write tools run in a transaction and add an audit row; stand in for both.
 (db as unknown as { transaction: unknown }).transaction = async (fn: (tx: unknown) => unknown) => fn(db);
 const { setAuditWriterForTest } = await import("../shared/audit");
+const { setSchedulingLocksForTest } = await import("../infrastructure/scheduling/composition");
+setSchedulingLocksForTest({ acquire: async () => {} });
 const auditRows: any[] = [];
 setAuditWriterForTest(async (entry) => { auditRows.push(entry); });
 const { schedules, venues, timeSlots, coachUsers } = await import("../../shared/schema");
@@ -21,9 +23,9 @@ const row = (id: string, coachName: string | null = null, coachName2: string | n
   id, date: "2026-09-30", venueId: venue.id, timeSlotId: slot.id,
   className: id, coachName, coachName2, coachCount: coachName2 ? 2 : 1,
   coach1IsTeaching: true, coach2IsTeaching: false, isClassLocked: false,
-  venue, timeSlot: slot,
+  venue, timeSlot: slot, version: 1, createdAt: null, updatedAt: null, notes: null,
 });
-const approved = [{ id: "real", name: "熊韋程", linkedCoachName: null, lineId: "test-line", status: "approved" }];
+const approved = [{ id: "real", name: "Synthetic Coach A", linkedCoachName: null, lineId: "test-line", status: "approved" }];
 
 test("MCP: repeated placeholders, both slots, search, clear and replacement with approved coach", async (t) => {
   const rows = [row("first"), row("second"), { ...row("third"), venueId: "other", venue: { ...venue, id: "other", name: "另一場館" } }];
@@ -36,7 +38,9 @@ test("MCP: repeated placeholders, both slots, search, clear and replacement with
   t.mock.method(storage, "getVenues", async () => [venue, { ...venue, id: "other", name: "另一場館" }]);
   t.mock.method(storage, "getTimeSlots", async () => [slot]);
   const approvalLookup = t.mock.method(storage, "getApprovedCoachUsers", async () => approved);
-  const call = (scheduleId: string, fields: object) => callSchedulingTool("update_schedule", { scheduleId, ...fields }) as Promise<any>;
+  t.mock.method(storage, "getSchedulesByDate", async () => rows);
+  t.mock.method(storage, "getCoachAvailabilityByWeek", async () => []);
+  const call = (scheduleId: string, fields: object) => callSchedulingTool("update_schedule", { scheduleId, expectedVersion: 1, ...fields }) as Promise<any>;
 
   for (const r of rows) {
     const result = await call(r.id, { coachName: "000" });
@@ -53,14 +57,19 @@ test("MCP: repeated placeholders, both slots, search, clear and replacement with
   await call("first", { coachName: null });
   assert.equal(rows[0].coachName, null);
   await assert.rejects(call("first", { coachName: "未核准" }), /已核准教練/);
-  assert.deepEqual((await call("first", { coachName: "熊韋程" })).conflictWarnings, []);
+  assert.deepEqual((await call("first", { coachName: "Synthetic Coach A" })).conflictWarnings, []);
   // Two classes at the same venue in one period are not a conflict (#6 is cross-venue).
-  assert.deepEqual((await call("second", { coachName: "熊韋程" })).conflictWarnings, []);
-  const conflict = await call("third", { coachName: "熊韋程" });
-  assert.equal(conflict.conflictWarnings[0].coachName, "熊韋程");
-  await assert.rejects(call("second", { coachName2: "熊韋程" }), /同一位教練/);
+  assert.deepEqual((await call("second", { coachName: "Synthetic Coach A" })).conflictWarnings, []);
+  let challenge: any;
+  await assert.rejects(call("third", { coachName: "Synthetic Coach A" }), (error: any) => {
+    challenge = error;
+    return error.code === "CONFIRM_REQUIRED" && typeof error.confirmationToken === "string";
+  });
+  const conflict = await call("third", { coachName: "Synthetic Coach A", confirmWarnings: ["COACH_CONFLICT"], confirmationToken: challenge.confirmationToken });
+  assert.equal(conflict.conflictWarnings[0].coachName, "Synthetic Coach A");
+  await assert.rejects(call("second", { coachName2: "Synthetic Coach A" }), (error: any) => error.code === "DUPLICATE_COACH");
   const last = auditRows.at(-1);
-  assert.deepEqual([last.actor, last.action, last.entityId, last.after.coachName], ["MCP", "schedule.update", "third", "熊韋程"]);
+  assert.deepEqual([last.actor, last.action, last.entityId, last.after.coachName], ["MCP", "schedule.update", "third", "Synthetic Coach A"]);
   assert.equal(last.reason, "另一場館 2026-09-30 第1節 third");
 });
 
@@ -95,19 +104,19 @@ test("MCP batch: preview and commit preserve 000 with no approval or conflict wa
   assert.equal(approvalLookup.mock.callCount(), 0);
   const imported = auditRows.at(-1);
   assert.deepEqual([imported.action, imported.after.created, imported.after.updated], ["schedule.import", 1, 1]);
-  const realPreview: any = await callSchedulingTool("create_or_update_schedules", { ...args, previewOnly: true, rows: args.rows.map(r => ({ ...r, coachName: "熊韋程" })) });
+  const realPreview: any = await callSchedulingTool("create_or_update_schedules", { ...args, previewOnly: true, rows: args.rows.map(r => ({ ...r, coachName: "Synthetic Coach A" })) });
   assert.ok(realPreview.rows[1].issues.some((i: any) => i.code === "coach_conflict"));
 });
 
 test("statistics and weekly recipients exclude placeholders but retain the real second coach", async (t) => {
-  const rows = [row("empty", "000", "000"), row("mixed", "000", "熊韋程")];
+  const rows = [row("empty", "000", "000"), row("mixed", "000", "Synthetic Coach A")];
   t.mock.method(db, "select", () => ({ from: () => ({ innerJoin: () => ({ where: async () => rows.map(r => ({ ...r, venueName: venue.name, venueColor: venue.color })) }) }) }));
   const stats = await new ScheduleRepository().getCoachStatistics("2026-09-30", "2026-09-30");
   assert.equal(stats.length, 1);
-  assert.equal(stats[0].coachName, "熊韋程");
+  assert.equal(stats[0].coachName, "Synthetic Coach A");
   assert.equal(stats[0].totalClasses, 1);
   t.mock.method(storage, "getApprovedCoachUsers", async () => [...approved, { ...approved[0], id: "placeholder", name: "000" }]);
   t.mock.method(storage, "getSchedulesByDateRange", async () => rows);
   const recipients = await buildRecipientsForWeek("2026-09-28", "2026-10-04");
-  assert.deepEqual(recipients.map(r => [r.recipientName, r.scheduleCount]), [["熊韋程", 1]]);
+  assert.deepEqual(recipients.map(r => [r.recipientName, r.scheduleCount]), [["Synthetic Coach A", 1]]);
 });

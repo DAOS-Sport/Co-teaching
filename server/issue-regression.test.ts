@@ -13,6 +13,9 @@ const { setAuditWriterForTest } = await import("./shared/audit");
 const auditRows: Array<Record<string, any>> = [];
 const collectAudit = async (entry: Record<string, any>) => { auditRows.push(entry); };
 setAuditWriterForTest(collectAudit as never);
+const { setSchedulingLocksForTest } = await import("./infrastructure/scheduling/composition");
+// This suite uses storage stand-ins; real advisory locks are tested on throwaway PostgreSQL.
+setSchedulingLocksForTest({ acquire: async () => {} });
 const { notifyCoachNotFound, coachNotFoundMessage } = await import("./modules/notification/coachNotFound");
 const { probeHttpService } = await import("./shared/serviceHealth");
 const { fetchWithTimeout } = await import("./shared/http/fetchWithTimeout");
@@ -148,7 +151,11 @@ test("#6 schedule writes enforce lock, conflict and availability rules on the se
     assert.equal(writes.length, before, "a blocked request must not write");
   };
   const expectSaved = async (method: string, path: string, body: object) => {
-    const res = await send(method, path, body);
+    let res = await send(method, path, body);
+    if (res.body.code === "CONFIRM_REQUIRED" && "confirmWarnings" in body) {
+      assert.equal(typeof res.body.confirmationToken, "string");
+      res = await send(method, path, { ...body, confirmationToken: res.body.confirmationToken });
+    }
     assert.equal(res.status, 200, `${method} ${path} ${JSON.stringify(body)} -> ${JSON.stringify(res.body)}`);
   };
   try {

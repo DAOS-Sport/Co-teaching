@@ -1,3 +1,5 @@
+import { createSchedulingUseCases } from "../infrastructure/scheduling/composition";
+import { requireScheduleVersion } from "../core/scheduling/policies";
 import { and, between, eq, inArray, sql } from "drizzle-orm";
 import { txDb as db, inTransaction } from "../shared/dbContext";
 import { MCP_ACTOR, recordAudit, scheduleContext, scheduleFields } from "../shared/audit";
@@ -91,10 +93,13 @@ export const schedulingTools = [
     name: "update_schedule",
     title: "修改單堂課",
     description:
-      "用 scheduleId 修改一堂課，可變更日期、場館、節次、班別、兩位教練、教學角色、人數及備註。課表鎖定時需先解鎖，或在使用者明確要求下使用 forceLocked。",
+      "用 scheduleId 修改一堂課，可變更日期、場館、節次、班別、兩位教練、教學角色、人數及備註。必須提供 find_schedules 回傳的 version 作 expectedVersion。鎖定後仍可指派教練，不能以 forceLocked 略過鎖定班名政策。",
     inputSchema: objectSchema(
       {
         scheduleId: { type: "string", minLength: 1 },
+        expectedVersion: { type: "integer", minimum: 1 },
+        confirmWarnings: { type: "array", items: { type: "string", enum: ["COACH_CONFLICT", "COACH_UNAVAILABLE"] } },
+        confirmationToken: { type: "string" },
         date: { type: "string", format: "date" },
         venueName: { type: "string" },
         period: { type: "integer", minimum: 1, maximum: 7 },
@@ -107,7 +112,7 @@ export const schedulingTools = [
         notes: { type: ["string", "null"] },
         forceLocked: { type: "boolean", default: false },
       },
-      ["scheduleId"],
+      ["scheduleId", "expectedVersion"],
     ),
     annotations: mutatingAnnotations(false),
   },
@@ -372,10 +377,8 @@ async function createOrUpdateSchedules(args: JsonObject) {
 async function updateSchedule(args: JsonObject) {
   const scheduleId = requiredString(args, "scheduleId");
   const existing = await storage.getScheduleById(scheduleId);
+  requireScheduleVersion(existing, args.expectedVersion);
   if (!existing) throw new Error(`找不到課程 ${scheduleId}`);
-  if (existing.isClassLocked && !optionalBoolean(args, "forceLocked")) {
-    throw new Error("課程已鎖定；請先解鎖，或在使用者明確要求後設 forceLocked=true");
-  }
   const update: ScheduleUpdateFields = {};
   if (args.date !== undefined) update.date = requiredDate(args, "date");
   if (args.venueName !== undefined) update.venueId = (await resolveVenue(requiredString(args, "venueName"))).id;
@@ -394,7 +397,6 @@ async function updateSchedule(args: JsonObject) {
   let nextCoach1 = update.coachName !== undefined ? update.coachName : existing.coachName;
   let nextCoach2 = update.coachName2 !== undefined ? update.coachName2 : existing.coachName2;
   let nextCoachCount = update.coachCount ?? existing.coachCount;
-  if (sameCoach(nextCoach1, nextCoach2)) throw new Error("同一堂課不可指派同一位教練兩次");
   if (nextCoach2 && nextCoachCount < 2) {
     nextCoachCount = 2;
     update.coachCount = 2;
@@ -411,14 +413,13 @@ async function updateSchedule(args: JsonObject) {
     update.coach1IsTeaching = update.coach2IsTeaching ?? existing.coach2IsTeaching;
     update.coach2IsTeaching = false;
   }
-  const updated = await storage.updateSchedule(scheduleId, update);
-  await mcpAudit({
-    action: "schedule.update",
-    entity: "schedule",
-    entityId: scheduleId,
-    before: scheduleFields(existing),
-    after: scheduleFields(updated),
-    reason: await scheduleContext(existing),
+  const useCases = createSchedulingUseCases({ actor: MCP_ACTOR, requestId: null, action: "schedule.update" });
+  const updated = await useCases.updateSchedule({
+    scheduleId, patch: update,
+    expectedVersion: typeof args.expectedVersion === "number" ? args.expectedVersion : null,
+    confirmWarnings: args.confirmWarnings,
+    confirmationToken: typeof args.confirmationToken === "string" ? args.confirmationToken : null,
+    auditContext: { actor: MCP_ACTOR, requestId: null },
   });
   const [detail] = (await storage.getSchedulesByDateRange(updated.date, updated.date)).filter((row) => row.id === scheduleId);
   const assignedCoaches = [updated.coachName, updated.coachName2].filter(isRealCoachName);
@@ -653,6 +654,7 @@ async function resolveCoachName(input: string): Promise<string> {
 function formatSchedule(row: Awaited<ReturnType<typeof storage.getSchedulesByDateRange>>[number]) {
   return {
     scheduleId: row.id,
+    version: row.version,
     date: row.date,
     venueName: row.venue.name,
     period: row.timeSlot.order,

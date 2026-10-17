@@ -87,11 +87,11 @@ export async function apiRequestWithConfirm(
   data: Record<string, unknown>,
   preconfirmed: string[] = [],
 ): Promise<Response> {
-  const send = (confirmWarnings: string[]) =>
+  const send = (confirmWarnings: string[], confirmationToken?: string) =>
     fetch(url, {
       method,
       headers: { ...getAdminAuthHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ ...data, confirmWarnings }),
+      body: JSON.stringify({ ...data, confirmWarnings, confirmationToken }),
       credentials: "include",
     });
 
@@ -104,7 +104,7 @@ export async function apiRequestWithConfirm(
       if (!confirmed) {
         throw new Error("已取消，未儲存");
       }
-      res = await send([...preconfirmed, ...warnings.map((warning) => warning.code)]);
+      res = await send([...preconfirmed, ...warnings.map((warning) => warning.code)], typeof body.confirmationToken === "string" ? body.confirmationToken : undefined);
     }
   }
 
