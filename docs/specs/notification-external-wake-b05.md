@@ -61,7 +61,7 @@ OIDC 驗證必須包括簽章／受限演算法、可信 JWKS、issuer、精確 
 2. 計算仍有效的 due slots，按固定身份交易 enqueue；不啟動 pg-boss timekeeper。worker 與普通 web lifecycle 分開，不能把 normal boot 改回有 SQL。
 3. 使用 `schedule:false`、`supervise:false` 的 bounded queue adapter。每輪明確 `await expire()` 回收已到期 active；單靠 supervisor interval 會在短請求裡永遠來不及回收。
 4. Weekly 父工作只保存／fan out 既有 recipient jobs；daily 改成 enqueue-only 並保存 targetDate。每個 recipient 是有限執行單位，保留 claim/fence/key/payload。不得在一個不可中止 handler 內送整份名單。
-5. `fetch → handler → await complete/fail`，核對 ack 的 affected result。安裝版 `fetch()` 會 emit error 後回空值，adapter 必須捕捉／重拋，不能把 DB 故障當 drained；不能依賴目前 `work()` callback 內未 await 的 ack。
+5. `fetch → handler → await complete/fail`，核對 ack 的 affected result。安裝版 `fetch()` 會吞 SQL 錯誤直接回 `[]`，並不 emit；adapter 必須在 `executeSql` 層保留錯誤並在 fetch 邊界重拋，不能依賴 error event 或把 DB 故障當 drained。也不能依賴目前 `work()` callback 內未 await 的 ack。
 6. 在剩餘 budget 不足時停止 claim，await 既有操作及 ack、釋放鎖，再回應。LINE、DB、JWKS、報表／儲存都須有各自的 timeout／AbortSignal；回應後不留下必要背景工作。HTTP 中斷也走 finally，不使用全程序 `process.exit()` 關閉共用網頁。
 7. 外部 driver 只在 `remainingWork` 時以同一目的繼續喚醒，受整體 deadline／重試上限限制。達上限記 incomplete／逾時，留原 job 給後續 tick；不清除資料或重建 key。
 
