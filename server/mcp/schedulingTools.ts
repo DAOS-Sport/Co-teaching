@@ -1,4 +1,7 @@
+import { enqueueScheduleUnlocked } from "../line-notify";
+import { randomUUID } from "node:crypto";
 import { createSchedulingUseCases } from "../infrastructure/scheduling/composition";
+import { inScheduleTransaction } from "../infrastructure/scheduling/transaction";
 import { requireScheduleVersion } from "../core/scheduling/policies";
 import { and, between, eq, inArray, sql } from "drizzle-orm";
 import { txDb as db, inTransaction } from "../shared/dbContext";
@@ -61,7 +64,7 @@ export const schedulingTools = [
     name: "create_or_update_schedules",
     title: "批次新增或更新課程",
     description:
-      "在指定場館一次新增最多 500 堂課。可先 previewOnly=true 預覽；updateMatching=true 時會更新同場館、日期、節次及班別完全相同的課程。",
+      "在指定場館一次新增最多 500 堂課。須先 previewOnly=true 取得確認 token，再以相同輸入提交；updateMatching=true 時會更新同場館、日期、節次及班別完全相同的課程。",
     inputSchema: objectSchema(
       {
         venueName: { type: "string", minLength: 1 },
@@ -84,6 +87,7 @@ export const schedulingTools = [
         },
         updateMatching: { type: "boolean", default: false },
         previewOnly: { type: "boolean", default: false },
+        confirmationToken: { type: "string", description: "Token from preview; commit requires the same input and current state" },
       },
       ["venueName", "rows"],
     ),
@@ -146,6 +150,7 @@ export const schedulingTools = [
         startDate: { type: "string", format: "date" },
         endDate: { type: "string", format: "date" },
         locked: { type: "boolean" },
+        operationId: { type: "string", minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9:_-]{1,128}$", description: "同一次解鎖操作的固定識別碼；重試沿用，避免建立重複通知" },
       },
       ["venueName", "startDate", "endDate", "locked"],
     ),
@@ -229,7 +234,7 @@ const mcpAudit = (entry: Omit<Parameters<typeof recordAudit>[0], "actor">) =>
 
 export async function callSchedulingTool(name: string, rawArgs: unknown): Promise<unknown> {
   const args = asObject(rawArgs);
-  if (MUTATING_TOOLS.has(name)) return inTransaction(() => dispatchSchedulingTool(name, args));
+  if (MUTATING_TOOLS.has(name)) return inScheduleTransaction(() => dispatchSchedulingTool(name, args));
   return dispatchSchedulingTool(name, args);
 }
 
@@ -358,10 +363,16 @@ async function createOrUpdateSchedules(args: JsonObject) {
     ].join("\t")),
   ].join("\n");
   const mode = optionalBoolean(args, "updateMatching") ? "update_matching" : "insert_only";
+  const providedFieldsByLine: Record<number, Array<"date" | "period" | "className" | "coachName" | "coachName2" | "coachCount" | "notes">> = {};
+  rawRows.forEach((row, index) => {
+    providedFieldsByLine[index + 2] = (["date", "period", "className", "coachName", "coachName2", "coachCount", "notes"] as const)
+      .filter(field => Object.prototype.hasOwnProperty.call(row, field));
+  });
+  const options = { providedFieldsByLine };
   if (optionalBoolean(args, "previewOnly")) {
-    return previewScheduleImport(venue.id, text, mode);
+    return previewScheduleImport(venue.id, text, mode, options);
   }
-  const result = await commitScheduleImport(venue.id, text, mode);
+  const result = await commitScheduleImport(venue.id, text, mode, args.confirmationToken, options);
   if (result.committed) {
     await mcpAudit({
       action: "schedule.import",
@@ -476,8 +487,17 @@ async function setScheduleLock(args: JsonObject) {
   const venue = await resolveVenue(requiredString(args, "venueName"));
   const { startDate, endDate } = readDateRange(args);
   const locked = requiredBoolean(args, "locked");
+  const operationId = optionalNullableString(args, "operationId") ?? randomUUID();
+  if (!/^[A-Za-z0-9:_-]{1,128}$/.test(operationId)) throw new Error("Invalid operationId");
+  const before = await storage.getSchedulesByDateRange(startDate, endDate);
+  const changed = before.some(row => row.venueId === venue.id && !!row.isClassLocked !== locked);
+  if (!changed) return { success: true, venue: venue.name, startDate, endDate, locked, notification: { status: "unchanged" } };
+  let notification: { status: string; notificationIds?: string[] } = { status: "not_requested" };
   if (locked) await storage.lockSchedules(venue.id, startDate, endDate);
-  else await storage.unlockSchedules(venue.id, startDate, endDate);
+  else {
+    await storage.unlockSchedules(venue.id, startDate, endDate);
+    notification = await enqueueScheduleUnlocked(venue.id, startDate, endDate, operationId);
+  }
   await mcpAudit({
     action: locked ? "schedule.lock" : "schedule.unlock",
     entity: "schedule_week",
@@ -485,7 +505,7 @@ async function setScheduleLock(args: JsonObject) {
     after: { venueName: venue.name, startDate, endDate, locked },
     reason: `${venue.name} ${startDate} ~ ${endDate}`,
   });
-  return { success: true, venue: venue.name, startDate, endDate, locked };
+  return { success: true, venue: venue.name, startDate, endDate, locked, notification };
 }
 
 async function getCoachAvailability(args: JsonObject) {

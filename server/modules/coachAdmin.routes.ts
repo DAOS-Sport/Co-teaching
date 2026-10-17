@@ -3,7 +3,7 @@ import type { CoachUser } from "@shared/schema";
 import type { AuditAction } from "@shared/auditActions";
 import { storage } from "../storage";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
-import { inTransaction } from "../shared/dbContext";
+import { inScheduleTransaction as inTransaction } from "../infrastructure/scheduling/transaction";
 import { ADMIN_ACTOR, coachFields, recordAudit, requestIdOf } from "../shared/audit";
 
 /** #3: a coach-account change and its audit row, committed together. */

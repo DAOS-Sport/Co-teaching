@@ -11,7 +11,7 @@ import { useLocation } from 'wouter';
 import { format, addDays, startOfWeek, addWeeks } from 'date-fns';
 import { zhTW } from 'date-fns/locale';
 import { School, ChevronLeft, ChevronRight, Edit, Plus, Save, X } from 'lucide-react';
-import type { Schedule, TimeSlot, Venue, TeacherFeedback } from '@shared/schema';
+import type { ScheduleDto as Schedule, TimeSlotDto as TimeSlot, VenueDto as Venue, TeacherFeedbackDto as TeacherFeedback } from "@shared/contracts";
 import TeacherLinkManager from '@/components/teacher-link-manager';
 
 // 多學校管理後台

@@ -1,6 +1,7 @@
 import { ScheduleMutationError, type AssignmentContextQuery, type AssignmentContext,
   type AvailabilityRow, type SchedulePatch, type ScheduleRow, type TimeSlotRow } from "../../core/scheduling/entities";
 import type { ScheduleMutationRepository } from "../../core/scheduling/ports";
+import type { ScheduleCreateValues } from "../../core/scheduling/create-schedule";
 
 /** The adapter accepts capabilities, not a concrete Drizzle implementation. */
 export interface ScheduleMutationStorage {
@@ -9,16 +10,17 @@ export interface ScheduleMutationStorage {
   getTimeSlots(): Promise<TimeSlotRow[]>;
   getCoachAvailabilityByWeek(weekStart: string): Promise<AvailabilityRow[]>;
   updateSchedule(id: string, patch: SchedulePatch, expectedVersion?: number): Promise<ScheduleRow>;
+  upsertSchedule(values: ScheduleCreateValues): Promise<ScheduleRow>;
 }
 
 export class StorageScheduleMutationRepository implements ScheduleMutationRepository {
   constructor(private readonly storage: ScheduleMutationStorage) {}
   getById(id: string) { return this.storage.getScheduleById(id); }
+  create(values: ScheduleCreateValues) { return this.storage.upsertSchedule(values); }
   async loadAssignmentContext(query: AssignmentContextQuery): Promise<AssignmentContext> {
-    const [sameDaySchedules, timeSlots, weekAvailability] = await Promise.all([
-      this.storage.getSchedulesByDate(query.date), this.storage.getTimeSlots(),
-      this.storage.getCoachAvailabilityByWeek(query.weekStart),
-    ]);
+    const sameDaySchedules = await this.storage.getSchedulesByDate(query.date);
+    const timeSlots = await this.storage.getTimeSlots();
+    const weekAvailability = await this.storage.getCoachAvailabilityByWeek(query.weekStart);
     return { sameDaySchedules, timeSlots, weekAvailability };
   }
   async update(id: string, patch: SchedulePatch, expectedVersion: number): Promise<ScheduleRow> {

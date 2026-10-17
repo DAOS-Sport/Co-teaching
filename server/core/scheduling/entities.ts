@@ -23,7 +23,7 @@ export type SchedulePatch = Partial<Pick<ScheduleRow,
   | "coachCount" | "isClassLocked" | "notes"
 >>;
 
-export type MutationKind = "updateSchedule" | "assignCoach";
+export type MutationKind = "updateSchedule" | "assignCoach" | "createSchedule";
 export type AssignmentWarningCode = "COACH_CONFLICT" | "COACH_UNAVAILABLE";
 
 export interface AssignmentWarning {

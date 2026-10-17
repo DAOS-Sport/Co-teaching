@@ -20,7 +20,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import * as XLSX from "xlsx";
-import type { CoachUser, Venue, VenueInfo } from "@shared/schema";
+import type { CoachUserDto as CoachUser, VenueDto as Venue, VenueInfoDto as VenueInfo } from "@shared/contracts";
 import AdminLayout from "@/components/admin-layout";
 
 // Read from sessionStorage on every call so we always pick up whatever

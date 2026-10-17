@@ -10,7 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { format, addDays, startOfWeek } from "date-fns";
 import { zhTW } from "date-fns/locale";
-import type { Venue, TimeSlot, Schedule } from "@shared/schema";
+import type { VenueDto as Venue, TimeSlotDto as TimeSlot, ScheduleDto as Schedule } from "@shared/contracts";
 import { getExtendedWeekDays, getExtendedWeekEnd } from "@/utils/special-workdays";
 
 interface ScheduleWithRegistrations extends Schedule {

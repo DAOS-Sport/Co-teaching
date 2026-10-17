@@ -4,7 +4,7 @@ import { useState, useRef, useImperativeHandle, forwardRef } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequestWithConfirm, cachedScheduleVersion } from "@/lib/queryClient";
 import CoachAutocomplete from "./coach-autocomplete";
-import type { Venue, TimeSlot, Schedule } from "@shared/schema";
+import type { VenueDto as Venue, TimeSlotDto as TimeSlot, ScheduleDto as Schedule } from "@shared/contracts";
 import { format, addDays, startOfWeek } from "date-fns";
 import { getExtendedWeekDays, getExtendedWeekEnd, getExtendedWeekdayNames } from "@/utils/special-workdays";
 import html2canvas from "html2canvas";

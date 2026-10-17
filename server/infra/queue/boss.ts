@@ -17,7 +17,9 @@ import PgBoss from "pg-boss";
 import { env } from "../../config/env";
 
 let bossInstance: PgBoss | null = null;
+let producerInstance: PgBoss | null = null;
 let startPromise: Promise<PgBoss> | null = null;
+let stopPromise: Promise<void> | null = null;
 let shutdownHooked = false;
 
 function buildBoss(): PgBoss {
@@ -25,6 +27,7 @@ function buildBoss(): PgBoss {
     connectionString: env.databaseUrl,
     // Keep a small pool so we don't fight the main app for connections.
     max: 4,
+    migrate: false,
     // Default retry policy — individual jobs may override per-publish.
     retryLimit: 3,
     retryDelay: 60,
@@ -50,6 +53,7 @@ function hookShutdown(): void {
  * multiple times concurrently; the second caller awaits the first.
  */
 export async function startBoss(): Promise<PgBoss> {
+  if (stopPromise) await stopPromise;
   if (bossInstance) return bossInstance;
   if (startPromise) return startPromise;
 
@@ -81,12 +85,21 @@ export function getBoss(): PgBoss {
   return bossInstance;
 }
 
+/** Producer methods use the caller's DB transaction; no start/migration/worker is run. */
+export function getQueueProducer(): PgBoss {
+  return bossInstance ?? (producerInstance ??= buildBoss());
+}
+
+export function setQueueProducerForTest(producer: PgBoss | null) { producerInstance = producer; }
+
 export async function stopBoss(): Promise<void> {
-  if (!bossInstance) return;
+  if (stopPromise) return stopPromise;
+  if (!bossInstance && startPromise) await startPromise;
   const b = bossInstance;
-  bossInstance = null;
-  startPromise = null;
-  await b.stop({ graceful: true, timeout: 30_000 }).catch((e) => {
-    console.error("[boss] error during stop", e);
-  });
+  if (!b) return;
+  stopPromise = (async () => {
+    await b.stop({ graceful: true, timeout: 30_000 });
+    if (bossInstance === b) { bossInstance = null; startPromise = null; }
+  })();
+  try { await stopPromise; } finally { stopPromise = null; }
 }

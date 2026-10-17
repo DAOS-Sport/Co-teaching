@@ -23,8 +23,7 @@ const row = (id: string, coachName: string | null = null, coachName2: string | n
   id, date: "2026-09-30", venueId: venue.id, timeSlotId: slot.id,
   className: id, coachName, coachName2, coachCount: coachName2 ? 2 : 1,
   coach1IsTeaching: true, coach2IsTeaching: false, isClassLocked: false,
-  venue, timeSlot: slot, version: 1, createdAt: null, updatedAt: null, notes: null,
-});
+  venue, timeSlot: slot, version: 1, createdAt: null, updatedAt: null, notes: null, classKey: id });
 const approved = [{ id: "real", name: "Synthetic Coach A", linkedCoachName: null, lineId: "test-line", status: "approved" }];
 
 test("MCP: repeated placeholders, both slots, search, clear and replacement with approved coach", async (t) => {
@@ -77,24 +76,27 @@ test("MCP batch: preview and commit preserve 000 with no approval or conflict wa
   const existing = [row("existing", "000", "000")];
   const written: any[] = [];
   const executor: any = {
-    execute: async () => undefined,
+    execute: async () => ({ rows: [] }),
     transaction: async (fn: (tx: unknown) => unknown) => fn(executor),
     select: () => ({ from: (table: unknown) => {
       const data = table === venues ? [venue] : table === timeSlots ? [slot] : table === schedules ? existing : table === coachUsers ? approved : [];
       return Object.assign(Promise.resolve(data), { where: async () => data });
     } }),
-    insert: () => ({ values: async (values: object) => written.push(values) }),
-    update: () => ({ set: (values: object) => ({ where: async () => written.push(values) }) }),
+    insert: () => ({ values: async (values: any) => { written.push(...(Array.isArray(values) ? values : [values])); } }),
+    update: () => ({ set: (values: any) => ({ where: () => ({ returning: async () => { written.push(values); return [{ id: existing[0].id }]; } }) }) }),
   };
   t.mock.method(db, "select", executor.select);
   t.mock.method(db, "transaction", async (fn: any) => fn(executor));
   t.mock.method(storage, "getVenues", async () => [venue]);
   const approvalLookup = t.mock.method(storage, "getApprovedCoachUsers", async () => approved);
+  const { setClassIdentityForTest } = await import("../adapters/repositories/schedule-batch.repository");
+  setClassIdentityForTest(async names => new Map(names.map(name => [name, name])));
+  t.after(() => setClassIdentityForTest(null));
   const args = { venueName: venue.name, updateMatching: true, rows: ["existing", "new"].map(className => ({ date: "2026-09-30", period: 1, className, coachName: "000", coachName2: "000" })) };
   const preview: any = await callSchedulingTool("create_or_update_schedules", { ...args, previewOnly: true });
   assert.equal(preview.canCommit, true);
   assert.equal(preview.summary.warning, 0);
-  const result: any = await callSchedulingTool("create_or_update_schedules", args);
+  const result: any = await callSchedulingTool("create_or_update_schedules", { ...args, confirmationToken: preview.confirmationToken });
   assert.equal(result.committed, true);
   assert.equal(result.created, 1);
   assert.equal(result.updated, 1);
@@ -104,6 +106,7 @@ test("MCP batch: preview and commit preserve 000 with no approval or conflict wa
   assert.equal(approvalLookup.mock.callCount(), 0);
   const imported = auditRows.at(-1);
   assert.deepEqual([imported.action, imported.after.created, imported.after.updated], ["schedule.import", 1, 1]);
+  existing.push({ ...row("fixture-cross-venue"), date: args.rows[0].date, venueId: "fixture-other-venue", venue: { ...venue, id: "fixture-other-venue" }, coachName: approved[0].name });
   const realPreview: any = await callSchedulingTool("create_or_update_schedules", { ...args, previewOnly: true, rows: args.rows.map(r => ({ ...r, coachName: "Synthetic Coach A" })) });
   assert.ok(realPreview.rows[1].issues.some((i: any) => i.code === "coach_conflict"));
 });

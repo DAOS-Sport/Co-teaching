@@ -7,10 +7,10 @@ import { storage } from "../storage";
 import {
   sendDailyTomorrowNotifications,
   sendFillReminderToCoaches,
+  sendLinePushMessage,
 } from "../line-notify";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
 import { env } from "../config/env";
-import { fetchWithTimeout } from "../shared/http/fetchWithTimeout";
 
 /** #3: a sent push cannot be rolled back, so it is recorded with its outcome. */
 const triggered = (req: Request, action: AuditAction, entityId: string, after: Record<string, unknown>, reason?: string) =>
@@ -148,22 +148,9 @@ export function registerNotifyRoutes(app: Express): void {
           // Task #32: timeout-bounded; manual re-push is iterating a
           // potentially large coach list — one stalled call must not
           // block the entire batch.
-          const pushRes = await fetchWithTimeout(
-            "https://api.line.me/v2/bot/message/push",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${token}`,
-              },
-              body: JSON.stringify({
-                to: coach.lineId,
-                messages: [{ type: "text", text: message }],
-              }),
-            }
-          );
+          const accepted = await sendLinePushMessage(coach.lineId, message);
 
-          if (pushRes.ok) {
+          if (accepted) {
             sentCount++;
             results.push({ coachName, success: true });
             await storage

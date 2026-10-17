@@ -7,7 +7,7 @@ import { ZodError } from "zod";
 import { storage } from "../storage";
 import { insertScheduleSchema, type Schedule } from "@shared/schema";
 import type { AuditAction } from "@shared/auditActions";
-import { inTransaction } from "../shared/dbContext";
+import { inScheduleTransaction } from "../infrastructure/scheduling/transaction";
 import {
   ADMIN_ACTOR,
   recordAudit,
@@ -17,7 +17,8 @@ import {
   venueNameOf,
 } from "../shared/audit";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
-import { notifyScheduleUnlocked } from "../line-notify";
+import { enqueueScheduleUnlocked } from "../line-notify";
+import { randomUUID } from "node:crypto";
 import {
   commitScheduleImport,
   previewScheduleImport,
@@ -66,7 +67,7 @@ async function auditedScheduleWrite(
   write: () => Promise<Schedule | null>,
 ): Promise<Schedule | null> {
   const context = await scheduleContext(existing ?? req.body);
-  return inTransaction(async () => {
+  return inScheduleTransaction(async () => {
     const saved = await write();
     await recordAudit({
       actor: ADMIN_ACTOR,
@@ -89,7 +90,7 @@ async function auditedBatch<T>(
   write: () => Promise<T>,
   summary: (result: T) => Record<string, unknown> | null,
 ): Promise<T> {
-  return inTransaction(async () => {
+  return inScheduleTransaction(async () => {
     const result = await write();
     const after = summary(result);
     if (after) await recordAudit({ actor: ADMIN_ACTOR, requestId: requestIdOf(req), ...entry, after });
@@ -117,27 +118,15 @@ export function registerScheduleRoutes(app: Express): void {
   app.post("/api/schedules", requireAdminPassword, async (req, res) => {
     try {
       const validatedData = insertScheduleSchema.parse(req.body);
-      if (isDuplicateCoach(validatedData.coachName, validatedData.coachName2)) {
-        return res.status(400).json({ code: "DUPLICATE_COACH", message: "同一堂課不可指派同一位教練兩次" });
-      }
-      if (await isVenueDateLocked(validatedData.venueId, validatedData.date)) {
-        return res.status(409).json(SCHEDULE_LOCKED);
-      }
-      const pending = await pendingAssignmentWarnings({
-        scheduleId: null,
-        venueId: validatedData.venueId,
-        date: validatedData.date,
-        timeSlotId: validatedData.timeSlotId,
-        before: null,
-        after: validatedData,
-        confirmed: req.body?.confirmWarnings,
+      const auditContext = { actor: ADMIN_ACTOR, requestId: requestIdOf(req) ?? null };
+      const schedule = await createSchedulingUseCases({ ...auditContext, action: "schedule.create" }).createSchedule({
+        values: validatedData, confirmWarnings: req.body?.confirmWarnings,
+        confirmationToken: req.body?.confirmationToken, auditContext,
       });
-      if (pending.length > 0) return res.status(409).json(confirmRequired(pending));
-      const schedule = await auditedScheduleWrite(req, "schedule.create", null, () =>
-        storage.upsertSchedule(validatedData),
-      );
       res.json(schedule);
     } catch (error) {
+      const presented = presentScheduleMutationError(error);
+      if (presented) return res.status(presented.status).json(presented.body);
       if (isPgUniqueViolation(error)) {
         return res.status(409).json({
           code: "DUPLICATE_CLASS_IN_CELL",
@@ -217,11 +206,12 @@ export function registerScheduleRoutes(app: Express): void {
         const result = await auditedBatch(
           req,
           { action: "schedule.import", entity: "schedule_import", entityId: input.venueId, reason: venueName },
-          () => commitScheduleImport(input.venueId, input.text, input.mode),
+          () => commitScheduleImport(input.venueId, input.text, input.mode, req.body?.confirmationToken),
           (done) => (done.committed ? { venueName, created: done.created, updated: done.updated } : null),
         );
         if (!result.committed) {
           return res.status(409).json({
+            code: result.code,
             message: "資料已變更或仍有錯誤，請重新確認預覽",
             preview: result.preview,
           });
@@ -254,6 +244,7 @@ export function registerScheduleRoutes(app: Express): void {
             targetStartDate,
             venueId,
             commit: preview !== true,
+            confirmationToken: req.body?.confirmationToken,
           });
         let result: Awaited<ReturnType<typeof copy>>;
         if (preview === true) {
@@ -265,13 +256,19 @@ export function registerScheduleRoutes(app: Express): void {
             { action: "schedule.copy_week", entity: "schedule_week", entityId: venueId, reason: `${venueName} ${sourceStartDate} → ${targetStartDate}` },
             copy,
             (done) =>
-              done.plannedCount > 0
+              done.committed && done.plannedCount > 0
                 ? { venueName, sourceWeek: sourceStartDate, targetWeek: targetStartDate, copied: done.plannedCount }
                 : null,
           );
         }
+        if (preview !== true && !result.committed) return res.status(409).json({
+          message: "資料已變更或尚未完成預覽，請確認新的複製預覽。", preview: result, ...result,
+        });
         res.json({ success: true, copied: result.committed ? result.plannedCount : 0, ...result });
       } catch (error) {
+        if (error instanceof Error && ["INVALID_COPY_RANGE", "OVERLAPPING_COPY_RANGE"].includes(error.message)) {
+          return res.status(400).json({ code: error.message, message: "來源限一至七日，且不能與目標週重疊。" });
+        }
         console.error("Error copying week:", error);
         if (isPgUniqueViolation(error)) {
           return res.status(409).json({ message: "目標週資料已被其他使用者修改，請重新預覽" });
@@ -318,14 +315,21 @@ export function registerScheduleRoutes(app: Express): void {
             .json({ message: "Missing venueId, startDate, or endDate" });
         }
         const venueName = await venueNameOf(venueId);
-        await auditedBatch(
+        const operationId = typeof req.body.operationId === "string" ? req.body.operationId : requestIdOf(req) ?? randomUUID();
+        if (!/^[A-Za-z0-9:_-]{1,128}$/.test(operationId)) return res.status(400).json({ message: "Invalid operationId" });
+        const notification = await auditedBatch(
           req,
           { action: "schedule.unlock", entity: "schedule_week", entityId: venueId, reason: `${venueName} ${startDate} ~ ${endDate}` },
-          () => storage.unlockSchedules(venueId, startDate, endDate),
-          () => ({ venueName, startDate, endDate, locked: false }),
+          async () => {
+            const before = await storage.getSchedulesByDateRange(startDate, endDate);
+            const changed = before.some(row => row.venueId === venueId && row.isClassLocked);
+            if (!changed) return { status: "unchanged" as const, notificationIds: [] };
+            await storage.unlockSchedules(venueId, startDate, endDate);
+            return enqueueScheduleUnlocked(venueId, startDate, endDate, operationId);
+          },
+          done => done.status === "unchanged" ? null : { venueName, startDate, endDate, locked: false, notification: done.status },
         );
-        notifyScheduleUnlocked(venueId, startDate, endDate).catch(() => {});
-        res.json({ success: true });
+        res.json({ success: true, notification });
       } catch (error) {
         res.status(500).json({ message: "Failed to unlock schedules" });
       }

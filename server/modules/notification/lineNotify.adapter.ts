@@ -1,68 +1,34 @@
-/**
- * Thin adapter around the LINE Push API used by the weekly-push
- * worker (Task #23).
- *
- * The legacy `server/line-notify.ts` already owns the cron-triggered
- * push code and an internal `sendLinePushMessage` helper. We do NOT
- * want to rewrite or expose that file's internals, so this adapter
- * re-implements the same minimal POST so the worker has its own
- * boundary for testing and error mapping.
- */
 import { env } from "../../config/env";
-import { fetchWithTimeout } from "../../shared/http/fetchWithTimeout";
+import { isRetryKey, type PushOutcome } from "../../core/notifications/delivery";
 
 const LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push";
-
-export interface LinePushResult {
-  ok: boolean;
-  status: number; // HTTP status, or 0 on transport error
-  errorCode: string | null;
-  errorMessage: string | null;
+export interface LinePushResult extends PushOutcome { ok: boolean }
+export async function sendTextMessage(to: string, text: string, retryKey: string): Promise<LinePushResult> {
+  return createLinePushAdapter({ token: env.lineChannelAccessToken ?? "", timeoutMs: env.outboundHttpTimeoutMs })(to, text, retryKey);
 }
-
-/**
- * Sends a single text push message to a LINE user/group ID.
- * Never throws — callers branch on `ok` so the worker can record
- * structured failure info on the recipient row.
- *
- * Errors come from `fetchWithTimeout` and are pre-classified:
- *   `timeout` | `network` | `http_4xx` | `http_5xx` | `no_token`.
- * The weekly-push worker uses these to decide retry vs. final-fail
- * (Task #32: 4xx other than 429 is treated as a hard error and is
- * not retried, since LINE 4xx responses won't change on retry).
- */
-export async function sendTextMessage(
-  to: string,
-  text: string,
-  retryKey?: string,
-): Promise<LinePushResult> {
-  const token = env.lineChannelAccessToken;
-  if (!token) {
-    return {
-      ok: false,
-      status: 0,
-      errorCode: "no_token",
-      errorMessage: "LINE_CHANNEL_ACCESS_TOKEN is not set",
-    };
-  }
-
-  const result = await fetchWithTimeout(LINE_PUSH_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      ...(retryKey ? { "X-Line-Retry-Key": retryKey } : {}),
-    },
-    body: JSON.stringify({
-      to,
-      messages: [{ type: "text", text }],
-    }),
-  });
-
-  return {
-    ok: result.ok,
-    status: result.status,
-    errorCode: result.errorCode,
-    errorMessage: result.errorMessage,
+export function createLinePushAdapter(options: { token: string; timeoutMs?: number; fetch?: typeof fetch }) {
+  return async (to: string, text: string, retryKey: string): Promise<LinePushResult> => {
+    if (!options.token || !isRetryKey(retryKey)) {
+      return { ok: false, outcome: "rejected", status: 0, errorCode: "CONFIG_ERROR", errorMessage: "A configured token and saved retry key are required" };
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
+    try {
+      const response = await (options.fetch ?? globalThis.fetch)(LINE_PUSH_URL, {
+        method: "POST", signal: controller.signal,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${options.token}`, "X-Line-Retry-Key": retryKey },
+        body: JSON.stringify({ to, messages: [{ type: "text", text }] }),
+      });
+      const requestId = response.headers.get("x-line-request-id") ?? undefined;
+      const acceptedRequestId = response.headers.get("x-line-accepted-request-id") ?? undefined;
+      if (response.ok || (response.status === 409 && acceptedRequestId)) {
+        return { ok: true, outcome: "accepted", status: response.status, requestId, acceptedRequestId, errorCode: null, errorMessage: null };
+      }
+      const unknown = response.status >= 500 || response.status === 408 || response.status === 409;
+      return { ok: false, outcome: unknown ? "unknown" : "rejected", status: response.status, requestId, acceptedRequestId,
+        errorCode: unknown ? "LINE_ACCEPTANCE_UNKNOWN" : "HTTP_4XX", errorMessage: unknown ? "Platform acceptance is unknown" : "Platform rejected the request" };
+    } catch {
+      return { ok: false, outcome: "unknown", status: 0, errorCode: controller.signal.aborted ? "TIMEOUT" : "NETWORK_ERROR", errorMessage: "Platform acceptance is unknown" };
+    } finally { clearTimeout(timer); }
   };
 }

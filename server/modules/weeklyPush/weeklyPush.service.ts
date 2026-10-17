@@ -1,3 +1,6 @@
+import { currentDb, inTransaction } from "../../shared/dbContext";
+import { queueTransactionDb } from "../../infra/queue/transaction";
+import { getQueueProducer } from "../../infra/queue/boss";
 /**
  * Weekly-push business logic (Task #23).
  *
@@ -260,7 +263,7 @@ export async function enqueueWeeklyPush(
  */
 export async function retryFailedRecipients(
   sourceRunId: string,
-): Promise<EnqueueResult> {
+): Promise<EnqueueResult> { return inTransaction(async () => {
   const source = await weeklyPushRepo.getRunById(sourceRunId);
   if (!source) throw new Error(`run ${sourceRunId} not found`);
 
@@ -288,7 +291,8 @@ export async function retryFailedRecipients(
     errorMessage: null,
   });
   return { run: (await weeklyPushRepo.getRunById(source.id))!, reused: true, recipientsCreated: failed.length };
-}
+
+}); }
 
 /**
  * Per-recipient retry policy — three retries with 60s backoff
@@ -315,14 +319,15 @@ export async function enqueueRecipientJob(
   recipientId: string,
   manualRetry = false,
 ): Promise<void> {
-  const boss = getBoss();
+  const boss = getQueueProducer();
   const data: WeeklyPushRecipientJobData = { runId, recipientId };
   await boss.send(queues.weeklyPushRecipient, data, {
     singletonKey: `${runId}:${recipientId}:${manualRetry ? randomUUID() : "initial"}`,
     retryLimit: RECIPIENT_RETRY_LIMIT,
     retryDelay: RECIPIENT_RETRY_DELAY_SECONDS,
     retryBackoff: true,
-  });
+  db: queueTransactionDb(currentDb()),
+});
 }
 
 /** Convenience used by the worker when it needs to fan out. */

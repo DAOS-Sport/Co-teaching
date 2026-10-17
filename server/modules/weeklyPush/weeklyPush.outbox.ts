@@ -1,24 +1,24 @@
-import { getBoss } from "../../infra/queue/boss";
-import { weeklyPushRepo } from "./weeklyPush.repository";
+import { and, eq, lte, or, isNull } from "drizzle-orm";
+import { weeklyPushOutbox } from "@shared/schema";
+import { currentDb, inTransaction } from "../../shared/dbContext";
+import { getQueueProducer } from "../../infra/queue/boss";
+import { queueTransactionDb } from "../../infra/queue/transaction";
 
-export async function dispatchWeeklyPushOutbox(): Promise<void> {
-  const boss = getBoss();
-  const rows = await weeklyPushRepo.listPendingOutbox();
-  for (const row of rows) {
-    try {
-      const payload = row.payloadJson as { runId?: string };
-      if (!payload.runId) throw new Error("outbox payload missing runId");
-      await boss.send(row.queueName, { runId: payload.runId }, {
-        singletonKey: `outbox:${row.runId}`,
-        retryLimit: 0,
-      });
-      await weeklyPushRepo.markOutboxPublished(row.id);
-    } catch (err) {
-      await weeklyPushRepo.markOutboxFailed(
-        row.id,
-        row.attemptCount + 1,
-        err instanceof Error ? err.message : String(err),
-      );
+/** Recovery for existing outbox records only. New bundles enqueue directly in their transaction. */
+export async function dispatchWeeklyPushOutbox() {
+  return inTransaction(async () => {
+    const tx = currentDb();
+    const rows = await tx.select().from(weeklyPushOutbox).where(and(eq(weeklyPushOutbox.status, "pending"),
+      or(isNull(weeklyPushOutbox.nextAttemptAt), lte(weeklyPushOutbox.nextAttemptAt, new Date())))).limit(50).for("update", { skipLocked: true });
+    const producer = getQueueProducer();
+    for (const row of rows) {
+      const adapter = queueTransactionDb(tx);
+      const data = row.payloadJson as { runId?: string };
+      if (data.runId !== row.runId) throw new Error("Invalid saved outbox identity");
+      const jobId = await producer.send(row.queueName, { runId: row.runId }, { id: row.runId, retryLimit: 3, db: adapter });
+      if (!jobId && !await producer.getJobById(row.queueName, row.runId, { db: adapter, includeArchive: true })) throw new Error("Outbox queue is unavailable");
+      await tx.update(weeklyPushOutbox).set({ status: "published", publishedAt: new Date(), updatedAt: new Date() }).where(eq(weeklyPushOutbox.id, row.id));
     }
-  }
+    return { published: rows.length };
+  });
 }

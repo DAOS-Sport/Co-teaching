@@ -6,7 +6,7 @@ import { once } from "node:events";
 const target = process.env.AUDIT_PG_URL;
 if (!target || process.env.CT_THROWAWAY_PG !== "1") throw new Error("Throwaway PostgreSQL opt-in required");
 const parsed = new URL(target);
-if (parsed.hostname !== "127.0.0.1" || !parsed.pathname.startsWith("/ct_a1_") || !parsed.port) {
+if (parsed.hostname !== "127.0.0.1" || !/^\/ct_(?:a1|ca3)_[a-zA-Z0-9_]+$/.test(parsed.pathname) || !parsed.port || parsed.port === "5432") {
   throw new Error("Refusing a non-disposable database target");
 }
 process.env.DATABASE_URL = "postgres://unused:unused@127.0.0.1:1/isolated";
@@ -77,8 +77,9 @@ test("A1 real PostgreSQL: network HTTP/MCP policies, locks, confirmation and ato
       await db.insert(schema.coachUsers).values({ id: "race-coach", name: "Synthetic Coach Race", status: "approved" });
       const count = await audits();
       const { placementLockKeys } = await import("./core/scheduling/policies");
-      const [key] = placementLockKeys(a, { ...a, coachName: "Synthetic Coach Race" });
+      const key = "schedule-writes";
       const blocker = await pool.connect();
+    const blockerPID = Number((await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
       let requests: Promise<{ status: number; body: any }[]> | undefined;
       try {
         await blocker.query("BEGIN");
@@ -92,7 +93,7 @@ test("A1 real PostgreSQL: network HTTP/MCP policies, locks, confirmation and ato
         const deadline = Date.now() + 3_000;
         let waiting = 0;
         while (waiting < 2 && Date.now() < deadline) {
-          const result = await pool.query("select count(*)::int as n from pg_locks l join pg_stat_activity a on a.pid=l.pid where l.locktype='advisory' and not l.granted and a.datname=current_database()");
+          const result = await pool.query("SELECT count(*)::int AS n FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid<>pg_backend_pid() AND pg_blocking_pids(a.pid) @> ARRAY[$1::int]", [blockerPID]);
           waiting = result.rows[0].n;
           if (waiting < 2) await new Promise(resolve => setTimeout(resolve, 20));
         }

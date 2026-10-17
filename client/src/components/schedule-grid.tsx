@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequestWithConfirm } from "@/lib/queryClient";
 import CoachAutocomplete from "./coach-autocomplete";
-import type { Venue, TimeSlot, Schedule } from "@shared/schema";
+import type { VenueDto as Venue, TimeSlotDto as TimeSlot, ScheduleDto as Schedule } from "@shared/contracts";
 
 interface ScheduleGridProps {
   date: string;
