@@ -1,0 +1,166 @@
+# Repository-variable activation is controlled separately from publication.
+# No checkout, repository contents permission, long-lived secret or external action.
+name: Co-teaching bounded notification wake
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '2-57/5 * * * *'
+permissions: {}
+concurrency:
+  group: co-teaching-production-wake
+  cancel-in-progress: false
+jobs:
+  wake:
+    if: ${{ vars.NOTIFICATION_WAKE_ENABLED == 'true' && github.repository_id == '1223131954' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    permissions:
+      contents: none
+      id-token: write
+    steps:
+      - name: Bounded wake with short-lived identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NOTIFICATION_WAKE_DRIVER'
+          import { pathToFileURL } from "node:url";
+          
+          // This destination is reviewed with the receiver, never supplied by workflow inputs or secrets.
+          export const NOTIFICATION_WAKE_ENDPOINT = "https://swim-scheduler-ronchen2.replit.app/api/internal/notification-wake";
+          const EXPECTED_WORKFLOW = "DAOS-Sport/Co-teaching/.github/workflows/notification-wake.yml@refs/heads/main";
+          class WakeClientError extends Error {}
+          const failure = (code) => { throw new WakeClientError(code); };
+          
+          function runtimeIdentity(env) {
+            if (env.GITHUB_ACTIONS !== "true" || env.GITHUB_REPOSITORY !== "DAOS-Sport/Co-teaching" ||
+              env.GITHUB_REPOSITORY_ID !== "1223131954" || env.GITHUB_REPOSITORY_OWNER_ID !== "278040315" ||
+              env.GITHUB_REF !== "refs/heads/main" || env.GITHUB_WORKFLOW_REF !== EXPECTED_WORKFLOW ||
+              !["schedule", "workflow_dispatch"].includes(env.GITHUB_EVENT_NAME) ||
+              typeof env.ACTIONS_ID_TOKEN_REQUEST_TOKEN !== "string" || !env.ACTIONS_ID_TOKEN_REQUEST_TOKEN ||
+              env.ACTIONS_ID_TOKEN_REQUEST_TOKEN.length > 16384) failure("ACTIONS_IDENTITY_REJECTED");
+            let url;
+            try { url = new URL(env.ACTIONS_ID_TOKEN_REQUEST_URL); } catch { failure("ACTIONS_IDENTITY_REJECTED"); }
+            if (url.protocol !== "https:" || !url.hostname.endsWith(".actions.githubusercontent.com") ||
+              url.username || url.password || url.hash || (url.port && url.port !== "443")) failure("ACTIONS_IDENTITY_REJECTED");
+            url.searchParams.set("audience", NOTIFICATION_WAKE_ENDPOINT);
+            return url.href;
+          }
+          async function readJson(response) {
+            if (!response.body) failure("WAKE_RESPONSE_INVALID");
+            const reader = response.body.getReader();
+            let size = 0;
+            const chunks = [];
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                size += value.byteLength;
+                if (size > 32768) failure("WAKE_RESPONSE_INVALID");
+                chunks.push(value);
+              }
+              return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            } catch { void reader.cancel().catch(() => {}); failure("WAKE_RESPONSE_INVALID"); }
+            finally { reader.releaseLock(); }
+          }
+          async function boundedFetch(fetchImpl, url, init, timeoutMs, code, parse) {
+            const controller = new AbortController();
+            let timer;
+            try {
+              return await Promise.race([
+                (async () => {
+                  const response = await fetchImpl(url, { ...init, redirect: "error", credentials: "omit", signal: controller.signal });
+                  if (response.redirected || (response.status >= 300 && response.status < 400)) failure(code);
+                  return parse(response);
+                })(),
+                new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new WakeClientError(code)); }, timeoutMs); }),
+              ]);
+            } catch (error) {
+              if (error instanceof WakeClientError) throw error;
+              failure(code);
+            } finally { clearTimeout(timer); controller.abort(); }
+          }
+          function boundedNumber(value, fallback, maximum) {
+            const selected = value ?? fallback;
+            if (!Number.isSafeInteger(selected) || selected < 1 || selected > maximum) failure("WAKE_CONFIG_INVALID");
+            return selected;
+          }
+          
+          /** Runtime credential and returned JWT stay local; only the returned aggregate may be logged. */
+          export async function runNotificationWake(options = {}) {
+            const aggregate = { version: 1, status: "incomplete", requests: 0, processed: 0, failed: 0, retries: 0 };
+            try {
+              const env = options.env ?? process.env;
+              const tokenUrl = runtimeIdentity(env);
+              const fetchImpl = options.fetch ?? fetch;
+              const now = options.now ?? Date.now;
+              const sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+              const totalDeadlineMs = boundedNumber(options.totalDeadlineMs, 600000, 600000);
+              const httpDeadlineMs = boundedNumber(options.httpDeadlineMs, 30000, 30000);
+              const maxRequests = boundedNumber(options.maxRequests, 60, 60);
+              const maxRetries = boundedNumber(options.maxRetries, 8, 8);
+              const deadline = now() + totalDeadlineMs;
+              const remaining = () => {
+                const ms = deadline - now();
+                if (!Number.isFinite(ms) || ms <= 0) failure("WAKE_DEADLINE");
+                return Math.min(ms, httpDeadlineMs);
+              };
+              const pause = async (ms) => {
+                if (ms >= deadline - now()) failure("WAKE_DEADLINE");
+                await sleep(ms);
+                remaining();
+              };
+              while (aggregate.requests < maxRequests) {
+                const token = await boundedFetch(fetchImpl, tokenUrl, {
+                  method: "GET", headers: { authorization: `Bearer ${env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`, accept: "application/json" },
+                }, remaining(), "OIDC_REQUEST_FAILED", async (response) => {
+                  if (response.status !== 200) failure("OIDC_REQUEST_FAILED");
+                  const result = await readJson(response);
+                  if (typeof result?.value !== "string" || result.value.length < 3 || result.value.length > 16384 || /[\r\n ]/.test(result.value)) failure("OIDC_RESPONSE_INVALID");
+                  return result.value;
+                });
+                aggregate.requests++;
+                const reply = await boundedFetch(fetchImpl, NOTIFICATION_WAKE_ENDPOINT, {
+                  method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+                  body: JSON.stringify({ version: 1 }),
+                }, remaining(), "WAKE_REQUEST_FAILED", async (response) => {
+                  if ([409, 429, 503].includes(response.status)) {
+                    const retryAfter = response.headers.get("retry-after");
+                    const seconds = retryAfter && /^\d{1,3}$/.test(retryAfter) ? Number(retryAfter) : 0;
+                    void response.body?.cancel().catch(() => {});
+                    return { busy: true, retryMs: Math.min(seconds * 1000, 30000) };
+                  }
+                  if (response.status !== 200) { void response.body?.cancel().catch(() => {}); failure("WAKE_HTTP_REJECTED"); }
+                  const body = await readJson(response);
+                  if (body?.version !== 1 || !["drained", "remaining", "busy"].includes(body.status) ||
+                    typeof body.remainingWork !== "boolean" || !Number.isSafeInteger(body.processed) || body.processed < 0 ||
+                    !Number.isSafeInteger(body.failed) || body.failed < 0 ||
+                    (body.status === "drained" ? body.remainingWork : !body.remainingWork)) failure("WAKE_RESPONSE_INVALID");
+                  return body.status === "busy" ? { busy: true, retryMs: 0 } : body;
+                });
+                if (reply.busy) {
+                  aggregate.retries++;
+                  if (aggregate.retries > maxRetries) failure("WAKE_RETRY_LIMIT");
+                  await pause(Math.max(reply.retryMs, Math.min(1000 * 2 ** (aggregate.retries - 1), 30000)));
+                  continue;
+                }
+                aggregate.processed += reply.processed;
+                aggregate.failed += reply.failed;
+                if (!Number.isSafeInteger(aggregate.processed) || !Number.isSafeInteger(aggregate.failed)) failure("WAKE_RESPONSE_INVALID");
+                if (!reply.remainingWork) { aggregate.status = "drained"; return aggregate; }
+                await pause(1000);
+              }
+              failure("WAKE_REQUEST_LIMIT");
+            } catch (error) {
+              return { ...aggregate, code: error instanceof WakeClientError ? error.message : "WAKE_CLIENT_FAILED" };
+            }
+          }
+          
+          if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+            const result = await runNotificationWake();
+            console.log(JSON.stringify(result));
+            if (result.status !== "drained" || result.failed > 0) process.exitCode = 1;
+          }
+          const outcome = await runNotificationWake();
+          console.log(JSON.stringify(outcome));
+          if (outcome.status !== "drained" || outcome.failed > 0) process.exitCode = 1;
+          NOTIFICATION_WAKE_DRIVER
