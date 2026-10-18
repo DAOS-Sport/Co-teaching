@@ -7,14 +7,26 @@ import { zhTW } from "date-fns/locale";
 import ts from "typescript";
 
 function load(relative: string, imports: Record<string, unknown>): any {
-  const module = { exports: {} };
-  const source = readFileSync(new URL(relative, import.meta.url), "utf8");
-  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: {
-    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true,
-  } }).outputText, { module, exports: module.exports, Date, Buffer, console,
-    require(name: string) { assert.ok(name in imports, `unstubbed dependency ${name}`); return imports[name]; },
-  }, { timeout: 5000 });
-  return module.exports;
+  const entry = new URL(relative, import.meta.url);
+  const byUrl = new Map(Object.entries(imports).filter(([name]) => name.startsWith('.'))
+    .map(([name, value]) => [new URL(name + '.ts', entry).href, value]));
+  const loaded = new Map<string, any>();
+  function evaluate(file: URL): any {
+    if (byUrl.has(file.href)) return byUrl.get(file.href);
+    if (loaded.has(file.href)) return loaded.get(file.href);
+    const module = { exports: {} }; loaded.set(file.href, module.exports);
+    const source = readFileSync(file, 'utf8');
+    vm.runInNewContext(ts.transpileModule(source, { compilerOptions: {
+      target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true,
+    } }).outputText, { module, exports: module.exports, Date, Buffer, console,
+      require(name: string) {
+        if (!name.startsWith('.')) { assert.ok(name in imports, `unstubbed dependency ${name}`); return imports[name]; }
+        return evaluate(new URL(name + '.ts', file));
+      },
+    }, { timeout: 5000 });
+    return module.exports;
+  }
+  return evaluate(entry);
 }
 
 const window = { weekStartDate: "2030-01-07", weekEndDate: "2030-01-13" };
@@ -63,6 +75,16 @@ test("historical dry-run still creates only skipped preview recipients", async (
   await f.service.enqueueWeeklyPush({ ...window, dryRun: true });
   assert.equal(f.bundles.length, 1); assert.equal(f.bundles[0].run.dryRun, true);
   assert.equal(f.bundles[0].recipients[0].status, "skipped"); assert.equal(f.events.includes("legacy-read"), false);
+});
+
+test('assembled service preserves the full coach message and atomic queue destination', async () => {
+  const f = serviceFixture(); await f.service.enqueueWeeklyPush(window);
+  assert.equal(f.bundles[0].recipients[0].payloadJson.message,
+    '📋 下週課程通知\n1/7(一) ~ 1/13(日)\n\nsynthetic-coach 老師，您好!\n您下週共有 1 堂課:\n' +
+    '\n📅 1/8(二)\n  🏊 synthetic-venue\n  ⏰ 09:00-10:00\n' +
+    '\n---\n請教練務必於課前準時抵達場館,主動向授課老師致意,並請確實熟悉「教練守則」。\n\n' +
+    '自本學期起,協同課程費用修正如下:\n• 單節課 250元\n• 兩節課合併 500元\n\n📌 課表如有異動請以系統為主：\nhttps://example.invalid/coach-portal');
+  assert.equal(f.bundles[0].run.idempotencyKey, 'weekly-send:2030-01-07:coaches');
 });
 
 for (const lineId of ["synthetic-other-destination", coach.lineId]) {
