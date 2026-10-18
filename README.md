@@ -57,4 +57,3 @@ Replit 保留既有網址與 Autoscale。`npm run start:autoscale` 是目前的�
 - [規格目錄](docs/README.md)
 - [設計指引](docs/development/design-guidelines.md)
 - [Agent 輔助資料](docs/development/assistant/README.md)
-

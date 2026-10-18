@@ -47,4 +47,3 @@ export function buildCoachWeeklyMessage(
   msg += `\n\n📌 課表如有異動請以系統為主：\n${env.publicOrigin}/coach-portal`;
   return msg;
 }
-

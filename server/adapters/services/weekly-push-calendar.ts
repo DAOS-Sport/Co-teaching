@@ -12,4 +12,3 @@ export function computeDefaultWeekRange(now: Date = new Date()): {
     weekEndDate: format(sunday, "yyyy-MM-dd"),
   };
 }
-
