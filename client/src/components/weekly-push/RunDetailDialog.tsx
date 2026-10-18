@@ -1,5 +1,6 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
+import { summarizeNotificationRecipients } from "@/lib/schedule-ui";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -89,17 +90,7 @@ export function RunDetailDialog({
   const run = data?.run;
   const recipients = data?.recipients ?? [];
 
-  const counts = recipients.reduce(
-    (acc, r) => {
-      acc.total += 1;
-      if (r.status === "success") acc.success += 1;
-      else if (r.status === "failed") acc.failed += 1;
-      else if (r.status === "skipped") acc.skipped += 1;
-      else acc.pending += 1;
-      return acc;
-    },
-    { total: 0, success: 0, failed: 0, skipped: 0, pending: 0 },
-  );
+  const counts = summarizeNotificationRecipients(recipients);
 
   const reportUrl = run?.reportPath
     ? `/api/admin/weekly-push/runs/${run.id}/report?password=${encodeURIComponent(adminPassword())}`
@@ -160,7 +151,7 @@ export function RunDetailDialog({
                 總計 <strong>{counts.total}</strong>
               </span>
               <span className="bg-green-50 border border-green-200 text-green-700 rounded px-2.5 py-1">
-                成功 <strong>{counts.success}</strong>
+                平台已接受 <strong>{counts.success}</strong>
               </span>
               <span className="bg-red-50 border border-red-200 text-red-700 rounded px-2.5 py-1">
                 失敗 <strong>{counts.failed}</strong>
@@ -171,6 +162,11 @@ export function RunDetailDialog({
               {counts.pending > 0 && (
                 <span className="bg-blue-50 border border-blue-200 text-blue-700 rounded px-2.5 py-1">
                   進行中 <strong>{counts.pending}</strong>
+                </span>
+              )}
+              {counts.unknown > 0 && (
+                <span className="bg-amber-50 border border-amber-200 text-amber-800 rounded px-2.5 py-1">
+                  結果未知 <strong>{counts.unknown}</strong>
                 </span>
               )}
             </div>

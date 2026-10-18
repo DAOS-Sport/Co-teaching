@@ -11,6 +11,32 @@ import { renderToStaticMarkup } from "react-dom/server";
 import * as scheduleUi from "./schedule-ui";
 import { assignmentChanges, batchContext, bindPreview, canCommitPreview, clearSubmittedDraft, failedSaveState, notificationReceiptLabel, ordinarySaveReceipt, previewCommitToken, previewRows, readScheduleLocation, remainingDraft, scheduleCellKey, scheduleLocation, validDateOnly, type BatchPreview } from "./schedule-ui";
 
+test("weekly run detail counts platform acceptance as complete in the actual component summary", () => {
+  const ast = parse("components/weekly-push/RunDetailDialog.tsx");
+  let expression: string | undefined;
+  function visit(node: ts.Node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(ast) === "counts") expression = node.initializer?.getText(ast);
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.ok(expression);
+  const context = { recipients: [...Array.from({ length: 25 }, () => ({ status: "accepted" })), { status: "failed" }],
+    summarizeNotificationRecipients: scheduleUi.summarizeNotificationRecipients, actual: undefined };
+  vm.runInNewContext(`actual = ${expression}`, context);
+  assert.deepEqual(context.actual, { total: 26, success: 25, failed: 1, skipped: 0, pending: 0, unknown: 0 });
+});
+
+test("notification summary retains legacy success and separates retries from unknown states", () => {
+  const statuses = ["success", "accepted", "failed", "skipped", "pending", "queued", "processing", "sending", "retry_wait", "unknown", "future_status"];
+  assert.deepEqual(scheduleUi.summarizeNotificationRecipients(statuses.map(status => ({ status }))),
+    { total: 11, success: 2, failed: 1, skipped: 1, pending: 5, unknown: 2 });
+});
+
+test("empty notification summaries contain no implied acceptance or work", () => {
+  assert.deepEqual(scheduleUi.summarizeNotificationRecipients([]),
+    { total: 0, success: 0, failed: 0, skipped: 0, pending: 0, unknown: 0 });
+});
+
 const clientRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 function parse(relative: string) {
   return ts.createSourceFile(relative, readFileSync(path.join(clientRoot, relative), "utf8"), ts.ScriptTarget.Latest, true);
