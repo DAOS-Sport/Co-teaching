@@ -335,6 +335,9 @@ test("API readiness polling 503 never queues logs while other errors and similar
   const { apiLogMiddleware, setAppLogWriterForTest, flushAppLogForTest, appLogQueueStats } = await import("./shared/appLog");
   const rows: { level: string; route?: string | null; status?: number | null }[] = [];
   let writes = 0;
+  // The preceding Ragic fixture queues logs without awaiting their writes.
+  // Finish those writes before resetting counters and replacing the test writer.
+  await flushAppLogForTest();
   setAppLogWriterForTest(async (entries) => { writes++; rows.push(...entries); });
   const app = express();
   app.use(apiLogMiddleware);

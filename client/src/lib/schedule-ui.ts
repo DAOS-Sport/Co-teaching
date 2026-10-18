@@ -96,3 +96,16 @@ export function notificationReceiptLabel(status?: string): string {
     default: return "未安排通知";
   }
 }
+
+/** Summaries distinguish platform acceptance, unresolved results and work still in progress. */
+export function summarizeNotificationRecipients(recipients: readonly { status: string }[]) {
+  const counts = { total: recipients.length, success: 0, failed: 0, skipped: 0, pending: 0, unknown: 0 };
+  for (const { status } of recipients) {
+    if (status === "accepted" || status === "success") counts.success++;
+    else if (status === "failed") counts.failed++;
+    else if (status === "skipped") counts.skipped++;
+    else if (["pending", "queued", "processing", "sending", "retry_wait"].includes(status)) counts.pending++;
+    else counts.unknown++;
+  }
+  return counts;
+}

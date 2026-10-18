@@ -19,3 +19,9 @@ Repository Adapter 沿用既有 `createRunBundle`：批次、收件者與 orches
 `server/weekly-push-use-cases.test.ts` 直接執行核心反例；`server/notification-cutover-parity.test.ts` 從相容 Service 經真實組裝／Use Case／Adapter 載入，僅替換最外層 I/O。原切換測試及隔離 PostgreSQL 測試保留。`npm run check:architecture` 從 AST 檢查核心全部依賴與執行環境存取。
 
 這是週通知的增量重構。其他功能仍有既有分層，不能據此宣稱全系統已達 Clean Architecture。索引減少重複掃描，實際線上延遲、容量及成本差異尚待量測。B05 自動喚醒與正式 active 驗收另行判定。
+
+## 詳情畫面的通知結果
+
+`client/src/lib/schedule-ui.ts` 的 `summarizeNotificationRecipients` 統一計算詳情摘要。`accepted` 與舊版 `success` 計入「平台已接受」，不表示使用者已讀或已收到。`failed`、`skipped` 與仍在處理的狀態分別計數。`unknown` 及無法識別的狀態計入「結果未知」，不當作進行中。
+
+`RunDetailDialog` 使用此摘要。已接受 25 筆、失敗 1 筆的完成批次，必須顯示平台已接受 25、失敗 1、進行中 0。回歸案例位於 `client/src/lib/schedule-ui.test.ts`；此顯示修正不更新資料庫或重新發送通知。
