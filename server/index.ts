@@ -1,10 +1,13 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { apiLogMiddleware } from "./shared/appLog";
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+// Records /api errors and refusals for the IT page (route template only).
+app.use(apiLogMiddleware);
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -21,7 +24,9 @@ app.use((req, res, next) => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
+      // MCP tool responses may contain source code or command output. Never
+      // mirror those bodies into the generic API request log.
+      if (capturedJsonResponse && path !== "/api/mcp") {
         logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
       }
 
@@ -36,7 +41,7 @@ app.use((req, res, next) => {
   next();
 });
 
-(async () => {
+export const webServerReady = (async () => {
   // 部署環境日誌
   if (process.env.REPLIT_DEPLOYMENT) {
     console.log('🚀 Running in Replit deployment mode');
@@ -69,11 +74,13 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || '5000', 10);
-  server.listen({
-    port,
-    host: "0.0.0.0",
-    reusePort: true,
-  }, () => {
-    log(`serving on port ${port}`);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ port, host: "0.0.0.0", reusePort: true }, () => {
+      server.removeListener("error", reject);
+      log(`serving on port ${port}`);
+      resolve();
+    });
   });
+  return server;
 })();

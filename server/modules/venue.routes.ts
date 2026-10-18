@@ -1,6 +1,8 @@
 import type { Express } from "express";
 import { storage } from "../storage";
 import { requireAdminPassword } from "../shared/auth/adminPassword";
+import { inScheduleTransaction as inTransaction } from "../infrastructure/scheduling/transaction";
+import { ADMIN_ACTOR, recordAudit, requestIdOf } from "../shared/audit";
 
 export function registerVenueRoutes(app: Express): void {
   app.get("/api/venues", async (_req, res) => {
@@ -22,7 +24,19 @@ export function registerVenueRoutes(app: Express): void {
       if (existingVenues.some((v) => v.name === name)) {
         return res.status(400).json({ message: "場館名稱已存在" });
       }
-      const venue = await storage.createVenue(name, color);
+      const venue = await inTransaction(async () => {
+        const created = await storage.createVenue(name, color);
+        await recordAudit({
+          actor: ADMIN_ACTOR,
+          requestId: requestIdOf(req),
+          action: "venue.create",
+          entity: "venue",
+          entityId: created.id,
+          after: { name: created.name, color: created.color },
+          reason: created.name,
+        });
+        return created;
+      });
       res.json(venue);
     } catch (error) {
       console.error("Error creating venue:", error);
@@ -32,7 +46,20 @@ export function registerVenueRoutes(app: Express): void {
 
   app.delete("/api/admin/venues/:id", requireAdminPassword, async (req, res) => {
     try {
-      await storage.deleteVenue(req.params.id);
+      // Deleting a venue also deletes its schedules (venue repository).
+      await inTransaction(async () => {
+        const venue = (await storage.getVenues()).find((v) => v.id === req.params.id);
+        await storage.deleteVenue(req.params.id);
+        await recordAudit({
+          actor: ADMIN_ACTOR,
+          requestId: requestIdOf(req),
+          action: "venue.delete",
+          entity: "venue",
+          entityId: req.params.id,
+          before: venue ? { name: venue.name, color: venue.color } : null,
+          reason: venue ? `${venue.name}（連同該場館課程）` : null,
+        });
+      });
       res.json({ success: true });
     } catch (error) {
       console.error("Error deleting venue:", error);
@@ -58,12 +85,29 @@ export function registerVenueRoutes(app: Express): void {
       try {
         const { venueName } = req.params;
         const { videoUrl, description, mapUrl } = req.body;
-        const info = await storage.upsertVenueInfo(
-          decodeURIComponent(venueName),
-          videoUrl || null,
-          description || null,
-          mapUrl || null
-        );
+        const name = decodeURIComponent(venueName);
+        const info = await inTransaction(async () => {
+          const previous = (await storage.getAllVenueInfos()).find((i) => i.venueName === name);
+          const saved = await storage.upsertVenueInfo(
+            name,
+            videoUrl || null,
+            description || null,
+            mapUrl || null
+          );
+          const pick = (i: typeof saved | undefined) =>
+            i ? { videoUrl: i.videoUrl, description: i.description, mapUrl: i.mapUrl } : null;
+          await recordAudit({
+            actor: ADMIN_ACTOR,
+            requestId: requestIdOf(req),
+            action: "venue_info.update",
+            entity: "venue_info",
+            entityId: name,
+            before: pick(previous),
+            after: pick(saved),
+            reason: name,
+          });
+          return saved;
+        });
         res.json(info);
       } catch (error) {
         console.error("Error updating venue info:", error);

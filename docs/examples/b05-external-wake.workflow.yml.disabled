@@ -1,0 +1,24 @@
+# DESIGN ONLY. This file is intentionally outside .github/workflows and disabled.
+# No OIDC trust, workflow, schedule, secret copy or deployment is activated.
+# Replace this specimen only after EW-01..12 implementation/review and approval.
+name: Proposed co-teaching bounded wake
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+permissions: {}
+concurrency:
+  group: co-teaching-production-wake
+  cancel-in-progress: false
+jobs:
+  wake:
+    if: ${{ false }} # Cannot execute even if this specimen is misplaced.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write # Requires explicit trust/activation approval; not granted here.
+    steps:
+      - name: Refuse incomplete design
+        run: |
+          echo 'B05-EW1 receiver, identity restrictions, bounded drain and acceptance are required.'
+          exit 1

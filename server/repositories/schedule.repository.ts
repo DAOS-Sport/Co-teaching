@@ -1,3 +1,4 @@
+import { copyBatchWeek } from "../adapters/repositories/schedule-batch.repository";
 /**
  * Schedule repository.
  *
@@ -5,8 +6,11 @@
  * and derived statistics/conflict queries. The IStorage façade in
  * `server/storage.ts` delegates its schedule-shaped methods here.
  */
+import { isRealCoachName } from "@shared/scheduleRules";
 import { and, between, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
-import { db } from "../db";
+// #3: follows the caller's transaction (see shared/dbContext).
+import { txDb as db } from "../shared/dbContext";
+import { addDays, format } from "date-fns";
 import {
   schedules,
   venues,
@@ -41,20 +45,47 @@ const scheduleSelect = {
   notes: schedules.notes,
   createdAt: schedules.createdAt,
   updatedAt: schedules.updatedAt,
+  version: schedules.version,
   venue: venues,
   timeSlot: timeSlots,
 };
 
 export type ScheduleUpdateFields = Partial<{
-  className: string;
-  coachName: string;
+  date: string;
+  venueId: string;
+  timeSlotId: string;
+  className: string | null;
+  coachName: string | null;
   coachName2: string | null;
   coachCount: number;
   coach1IsTeaching: boolean;
   coach2IsTeaching: boolean;
+  isClassLocked: boolean;
+  notes: string | null;
 }>;
 
+/** The row changed since the editor loaded it (or is gone). */
+export class ScheduleVersionConflictError extends Error {
+  constructor() {
+    super("SCHEDULE_VERSION_CONFLICT");
+    this.name = "ScheduleVersionConflictError";
+  }
+}
+
+const bumpVersion = () => sql`${schedules.version} + 1`;
+
+/** Matches the row, and when the caller supplied one, the version it saw. */
+const rowAtVersion = (id: string, expectedVersion?: number) =>
+  expectedVersion === undefined
+    ? eq(schedules.id, id)
+    : and(eq(schedules.id, id), eq(schedules.version, expectedVersion));
+
 export class ScheduleRepository {
+  copyWeekIntoEmptyCells(input: {
+    sourceStartDate: string; sourceEndDate: string; targetStartDate: string;
+    venueId: string; commit: boolean; confirmationToken?: unknown;
+  }) { return copyBatchWeek(input); }
+
   async getSchedulesByDate(
     date: string
   ): Promise<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]> {
@@ -93,6 +124,7 @@ export class ScheduleRepository {
           eq(schedules.venueId, venueId),
           between(schedules.date, startDate, endDate),
           isNotNull(schedules.className),
+          sql`trim(${schedules.className}) <> ''`,
           or(isNull(schedules.coachName), eq(schedules.coachName, ""))
         )
       )
@@ -117,9 +149,13 @@ export class ScheduleRepository {
 
   async updateSchedule(
     id: string,
-    updateData: ScheduleUpdateFields
+    updateData: ScheduleUpdateFields,
+    expectedVersion?: number
   ): Promise<Schedule> {
-    const setData: Record<string, unknown> = { updatedAt: new Date() };
+    const setData: Record<string, unknown> = { updatedAt: new Date(), version: bumpVersion() };
+    if (updateData.date !== undefined) setData.date = updateData.date;
+    if (updateData.venueId !== undefined) setData.venueId = updateData.venueId;
+    if (updateData.timeSlotId !== undefined) setData.timeSlotId = updateData.timeSlotId;
     if (updateData.className !== undefined) setData.className = updateData.className;
     if (updateData.coachName !== undefined) setData.coachName = updateData.coachName;
     if (updateData.coachName2 !== undefined) setData.coachName2 = updateData.coachName2;
@@ -128,16 +164,24 @@ export class ScheduleRepository {
       setData.coach1IsTeaching = updateData.coach1IsTeaching;
     if (updateData.coach2IsTeaching !== undefined)
       setData.coach2IsTeaching = updateData.coach2IsTeaching;
+    if (updateData.isClassLocked !== undefined)
+      setData.isClassLocked = updateData.isClassLocked;
+    if (updateData.notes !== undefined) setData.notes = updateData.notes;
     const [result] = await db
       .update(schedules)
       .set(setData)
-      .where(eq(schedules.id, id))
+      .where(rowAtVersion(id, expectedVersion))
       .returning();
+    if (!result && expectedVersion !== undefined) throw new ScheduleVersionConflictError();
     return result;
   }
 
-  async deleteSchedule(id: string): Promise<void> {
-    await db.delete(schedules).where(eq(schedules.id, id));
+  async deleteSchedule(id: string, expectedVersion?: number): Promise<void> {
+    const deleted = await db
+      .delete(schedules)
+      .where(rowAtVersion(id, expectedVersion))
+      .returning({ id: schedules.id });
+    if (deleted.length === 0 && expectedVersion !== undefined) throw new ScheduleVersionConflictError();
   }
 
   async getCoachSchedules(
@@ -181,7 +225,7 @@ export class ScheduleRepository {
           const parts = schedule.coachName.split("-");
           for (let i = 1; i < parts.length; i++) {
             const coach = parts[i].trim();
-            if (coach && coach !== "缺") coaches.push(coach);
+            if (isRealCoachName(coach) && coach !== "缺") coaches.push(coach);
           }
         } else {
           coaches.push(schedule.coachName.trim());
@@ -190,7 +234,7 @@ export class ScheduleRepository {
       if (schedule.coachName2) coaches.push(schedule.coachName2.trim());
       if (coaches.length === 0) return;
 
-      coaches.forEach((coachName) => {
+      coaches.filter(isRealCoachName).forEach((coachName) => {
         if (!coachTimeSlotMap.has(coachName)) {
           coachTimeSlotMap.set(coachName, new Map());
         }
@@ -202,10 +246,12 @@ export class ScheduleRepository {
       });
     });
 
+    // Only a clash across venues counts; two classes at one venue do not.
     coachTimeSlotMap.forEach((timeSlotMap, coachName) => {
       timeSlotMap.forEach((venueNames, timeSlotId) => {
-        if (venueNames.length > 1) {
-          conflicts.push({ coachName, timeSlotId, venues: venueNames });
+        const distinctVenues = Array.from(new Set(venueNames));
+        if (distinctVenues.length > 1) {
+          conflicts.push({ coachName, timeSlotId, venues: distinctVenues });
         }
       });
     });
@@ -230,6 +276,8 @@ export class ScheduleRepository {
         coachName2: schedules.coachName2,
         coach1IsTeaching: schedules.coach1IsTeaching,
         coach2IsTeaching: schedules.coach2IsTeaching,
+        coachCount: schedules.coachCount,
+        className: schedules.className,
         venueName: venues.name,
         venueColor: venues.color,
       })
@@ -238,6 +286,7 @@ export class ScheduleRepository {
       .where(
         and(
           between(schedules.date, startDate, endDate),
+          isNotNull(schedules.className),
           sql`(${schedules.coachName} IS NOT NULL AND ${schedules.coachName} != '' OR ${schedules.coachName2} IS NOT NULL AND ${schedules.coachName2} != '')`
         )
       );
@@ -258,7 +307,7 @@ export class ScheduleRepository {
       venueColor: string,
       isTeaching: boolean
     ) => {
-      if (!name || name.trim() === "") return;
+      if (!isRealCoachName(name)) return;
       const trimmed = name.trim();
       if (!coachStats.has(trimmed)) {
         coachStats.set(trimmed, {
@@ -283,7 +332,7 @@ export class ScheduleRepository {
     for (const row of allSchedules) {
       if (row.coachName)
         addCoachCount(row.coachName, row.venueName, row.venueColor, !!row.coach1IsTeaching);
-      if (row.coachName2)
+      if (row.coachCount >= 2 && row.coachName2 && (!row.coachName || normalizeString(row.coachName) !== normalizeString(row.coachName2)))
         addCoachCount(row.coachName2, row.venueName, row.venueColor, !!row.coach2IsTeaching);
     }
 
@@ -319,11 +368,11 @@ export class ScheduleRepository {
         const parts = splitByAnySeparator(result.coachName);
         for (let i = 1; i < parts.length; i++) {
           const coach = parts[i].trim();
-          if (coach && coach !== "缺") uniqueCoaches.add(coach);
+          if (isRealCoachName(coach) && coach !== "缺") uniqueCoaches.add(coach);
         }
       } else {
         const coach = result.coachName.trim();
-        if (coach && coach !== "缺") uniqueCoaches.add(coach);
+        if (isRealCoachName(coach) && coach !== "缺") uniqueCoaches.add(coach);
       }
     });
     return Array.from(uniqueCoaches).sort();
@@ -381,6 +430,7 @@ export class ScheduleRepository {
           notes: result.notes,
           createdAt: result.createdAt,
           updatedAt: result.updatedAt,
+          version: result.version,
           venue: result.venue,
           timeSlot: result.timeSlot,
           registrations: [],
@@ -433,7 +483,7 @@ export class ScheduleRepository {
   ): Promise<void> {
     await db
       .update(schedules)
-      .set({ isClassLocked: true, updatedAt: new Date() })
+      .set({ isClassLocked: true, updatedAt: new Date(), version: bumpVersion() })
       .where(
         and(
           eq(schedules.venueId, venueId),
@@ -449,7 +499,7 @@ export class ScheduleRepository {
   ): Promise<void> {
     await db
       .update(schedules)
-      .set({ isClassLocked: false, updatedAt: new Date() })
+      .set({ isClassLocked: false, updatedAt: new Date(), version: bumpVersion() })
       .where(
         and(
           eq(schedules.venueId, venueId),
@@ -460,13 +510,15 @@ export class ScheduleRepository {
 
   async assignCoach(
     scheduleId: string,
-    coachName: string | null
+    coachName: string | null,
+    expectedVersion?: number
   ): Promise<Schedule> {
     const [result] = await db
       .update(schedules)
-      .set({ coachName, updatedAt: new Date() })
-      .where(eq(schedules.id, scheduleId))
+      .set({ coachName, updatedAt: new Date(), version: bumpVersion() })
+      .where(rowAtVersion(scheduleId, expectedVersion))
       .returning();
+    if (!result && expectedVersion !== undefined) throw new ScheduleVersionConflictError();
     return result;
   }
 

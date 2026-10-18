@@ -28,6 +28,8 @@ export function getSession() {
   const sessionStore = new pgStore({
     conString: process.env.DATABASE_URL,
     createTableIfMissing: false,
+    // Pruning writes to the DB; run it only through an explicit maintenance operation.
+    pruneSessionInterval: false,
     ttl: sessionTtl,
     tableName: "sessions",
   });

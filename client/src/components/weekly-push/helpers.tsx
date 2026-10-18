@@ -1,4 +1,5 @@
 import { format } from "date-fns";
+import { notificationReceiptLabel } from "@/lib/schedule-ui";
 import { Badge } from "@/components/ui/badge";
 import {
   RefreshCw,
@@ -7,7 +8,7 @@ import {
   XCircle,
   Clock,
 } from "lucide-react";
-import type { WeeklyPushRun, WeeklyPushRecipient } from "@shared/schema";
+import type { WeeklyPushRunDto as WeeklyPushRun, WeeklyPushRecipientDto as WeeklyPushRecipient } from "@shared/contracts";
 
 export interface RunsResponse {
   runs: WeeklyPushRun[];
@@ -50,7 +51,9 @@ export function statusBadge(status: string) {
           排程中
         </Badge>
       );
-    case "running":
+    case "preparing":
+    case "sending":
+    case "reconciling":
       return (
         <Badge
           variant="outline"
@@ -67,13 +70,15 @@ export function statusBadge(status: string) {
           全部成功
         </Badge>
       );
-    case "partial_failed":
+    case "partial_success":
       return (
         <Badge className="bg-yellow-500 hover:bg-yellow-600 whitespace-nowrap">
           <AlertTriangle className="h-3 w-3 mr-1" />
           部分失敗
         </Badge>
       );
+    case "cancelled":
+      return <Badge variant="outline">已取消</Badge>;
     case "failed":
       return (
         <Badge variant="destructive" className="whitespace-nowrap">
@@ -87,6 +92,8 @@ export function statusBadge(status: string) {
 }
 
 export function recipientStatusBadge(status: string) {
+  if (status === "accepted") return <Badge className="bg-emerald-100 text-emerald-800">{notificationReceiptLabel(status)}</Badge>;
+  if (status === "unknown") return <Badge variant="outline" className="text-amber-800">{notificationReceiptLabel(status)}</Badge>;
   switch (status) {
     case "success":
       return <Badge className="bg-green-500 whitespace-nowrap">成功</Badge>;
@@ -114,6 +121,12 @@ export function recipientStatusBadge(status: string) {
           等待中
         </Badge>
       );
+    case "sending":
+      return <Badge className="bg-blue-500 whitespace-nowrap">發送中</Badge>;
+    case "retry_wait":
+      return <Badge className="bg-amber-500 whitespace-nowrap">等待重試</Badge>;
+    case "cancelled":
+      return <Badge variant="outline">已取消</Badge>;
     default:
       return <Badge variant="outline">{status}</Badge>;
   }

@@ -68,8 +68,9 @@ export interface IStorage {
     endDate: string
   ): Promise<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]>;
   upsertSchedule(schedule: InsertScheduleType): Promise<Schedule>;
-  updateSchedule(id: string, updateData: ScheduleUpdateFields): Promise<Schedule>;
-  deleteSchedule(id: string): Promise<void>;
+  copyWeekIntoEmptyCells(input: Parameters<ScheduleRepository["copyWeekIntoEmptyCells"]>[0]): ReturnType<ScheduleRepository["copyWeekIntoEmptyCells"]>;
+  updateSchedule(id: string, updateData: ScheduleUpdateFields, expectedVersion?: number): Promise<Schedule>;
+  deleteSchedule(id: string, expectedVersion?: number): Promise<void>;
   getCoachSchedules(
     coachName: string,
     startDate: string,
@@ -163,7 +164,7 @@ export interface IStorage {
     startDate: string,
     endDate: string
   ): Promise<void>;
-  assignCoach(scheduleId: string, coachName: string | null): Promise<Schedule>;
+  assignCoach(scheduleId: string, coachName: string | null, expectedVersion?: number): Promise<Schedule>;
   getScheduleLockStatus(
     venueId: string,
     startDate: string,
@@ -235,10 +236,13 @@ export class DatabaseStorage implements IStorage {
     this.scheduleRepo.getVacantSchedules(venueId, startDate, endDate);
   upsertSchedule = (schedule: InsertScheduleType) =>
     this.scheduleRepo.upsertSchedule(schedule);
+  copyWeekIntoEmptyCells = (input: Parameters<ScheduleRepository["copyWeekIntoEmptyCells"]>[0]) =>
+    this.scheduleRepo.copyWeekIntoEmptyCells(input);
   getScheduleById = (id: string) => this.scheduleRepo.getScheduleById(id);
-  updateSchedule = (id: string, updateData: ScheduleUpdateFields) =>
-    this.scheduleRepo.updateSchedule(id, updateData);
-  deleteSchedule = (id: string) => this.scheduleRepo.deleteSchedule(id);
+  updateSchedule = (id: string, updateData: ScheduleUpdateFields, expectedVersion?: number) =>
+    this.scheduleRepo.updateSchedule(id, updateData, expectedVersion);
+  deleteSchedule = (id: string, expectedVersion?: number) =>
+    this.scheduleRepo.deleteSchedule(id, expectedVersion);
   getCoachSchedules = (coachName: string, startDate: string, endDate: string) =>
     this.scheduleRepo.getCoachSchedules(coachName, startDate, endDate);
   getConflicts = (date: string) => this.scheduleRepo.getConflicts(date);
@@ -261,8 +265,8 @@ export class DatabaseStorage implements IStorage {
     this.scheduleRepo.lockSchedules(venueId, startDate, endDate);
   unlockSchedules = (venueId: string, startDate: string, endDate: string) =>
     this.scheduleRepo.unlockSchedules(venueId, startDate, endDate);
-  assignCoach = (scheduleId: string, coachName: string | null) =>
-    this.scheduleRepo.assignCoach(scheduleId, coachName);
+  assignCoach = (scheduleId: string, coachName: string | null, expectedVersion?: number) =>
+    this.scheduleRepo.assignCoach(scheduleId, coachName, expectedVersion);
   getScheduleLockStatus = (
     venueId: string,
     startDate: string,

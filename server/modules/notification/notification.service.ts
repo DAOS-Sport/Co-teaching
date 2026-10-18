@@ -1,3 +1,4 @@
+import { notificationIdentity, sendDurableText } from "./delivery.service";
 /**
  * Group-level summary notifications used by the weekly push (Task #23).
  *
@@ -8,7 +9,6 @@
  */
 import { env } from "../../config/env";
 import { lineGroups } from "../../config/lineGroups";
-import { sendTextMessage } from "./lineNotify.adapter";
 import type { WeeklyPushRecipient, WeeklyPushRun } from "@shared/schema";
 
 interface SummaryParams {
@@ -76,40 +76,30 @@ function formatSummaryMessage(
  * only produce a warn-level log so the worker keeps running. Returns
  * the per-group dispatch outcome for diagnostic logging.
  */
-export async function pushRunSummary(
-  params: SummaryParams,
-): Promise<{ itPushed: boolean; xiePushed: boolean }> {
+export async function pushRunSummary(params: SummaryParams) {
+  if (params.run.dryRun) {
+    return { itPushed: false, xiePushed: false, states: { it: "skipped", xie: "skipped" },
+      status: "skipped", configuredCount: 0, resultVersion: null, skippedReason: "dry_run" } as const;
+  }
   const origin = params.publicOrigin ?? env.publicOrigin;
   const text = formatSummaryMessage(params.run, params.recipients, origin);
-
-  let itPushed = false;
-  let xiePushed = false;
-
-  if (lineGroups.itGroupId) {
-    const r = await sendTextMessage(lineGroups.itGroupId, text);
-    if (r.ok) itPushed = true;
-    else
-      console.warn(
-        `[notification] IT group summary push failed (${r.errorCode}): ${r.errorMessage}`,
-      );
-  } else {
-    console.warn("[notification] LINE_IT_GROUP_ID not set — skipping IT summary");
-  }
-
-  if (lineGroups.xieTongGroupId) {
-    const r = await sendTextMessage(lineGroups.xieTongGroupId, text);
-    if (r.ok) xiePushed = true;
-    else
-      console.warn(
-        `[notification] 協同課 group summary push failed (${r.errorCode}): ${r.errorMessage}`,
-      );
-  } else {
-    console.warn(
-      "[notification] LINE_XIE_TONG_GROUP_ID not set — skipping 協同課 summary",
-    );
-  }
-
-  return { itPushed, xiePushed };
+  const resultVersion = notificationIdentity("weekly-summary-result", [params.run.status, params.run.totalCount, params.run.successCount,
+    params.run.failureCount, params.run.skippedCount, params.recipients.map(r => [r.id, r.status, r.errorCode ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0])))]);
+  type State = "accepted" | "unknown" | "failed" | "not_configured";
+  const send = async (to: string | undefined | null, target: string): Promise<State> => {
+    if (!to) return "not_configured";
+    const result = await sendDurableText({ notificationId: notificationIdentity("weekly-summary", [params.run.id, target, resultVersion]), to, text, reuseSavedPayload: true });
+    if (result.accepted) return "accepted";
+    if (result.state === "not_configured") return "not_configured";
+    return result.state === "failed" ? "failed" : "unknown";
+  };
+  const it = await send(lineGroups.itGroupId, "it");
+  const xie = await send(lineGroups.xieTongGroupId, "xie");
+  const configuredCount = Number(Boolean(lineGroups.itGroupId)) + Number(Boolean(lineGroups.xieTongGroupId));
+  const configured = [it, xie].filter(state => state !== "not_configured");
+  const status: State = configured.includes("failed") ? "failed" : configured.includes("unknown") ? "unknown"
+    : configured.length === configuredCount && configuredCount > 0 ? "accepted" : "not_configured";
+  return { itPushed: it === "accepted", xiePushed: xie === "accepted", states: { it, xie }, status, configuredCount, resultVersion };
 }
 
 export { formatSummaryMessage };

@@ -1,3 +1,5 @@
+> 歷史文件：此頁保留舊部署做法，不能作為目前啟動、資料庫修改或發布依據。現行入口見 [README](../../README.md) 及 [B05 外部喚醒規格](../specs/notification-external-wake-b05.md)。
+
 # 🚀 生產環境部署指南
 
 ## 📋 部署前準備

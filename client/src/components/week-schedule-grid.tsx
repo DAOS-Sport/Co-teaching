@@ -1,9 +1,10 @@
+import { isPlaceholderCoach } from "@shared/scheduleRules";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useRef, useImperativeHandle, forwardRef } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequestWithConfirm, cachedScheduleVersion } from "@/lib/queryClient";
 import CoachAutocomplete from "./coach-autocomplete";
-import type { Venue, TimeSlot, Schedule } from "@shared/schema";
+import type { VenueDto as Venue, TimeSlotDto as TimeSlot, ScheduleDto as Schedule } from "@shared/contracts";
 import { format, addDays, startOfWeek } from "date-fns";
 import { getExtendedWeekDays, getExtendedWeekEnd, getExtendedWeekdayNames } from "@/utils/special-workdays";
 import html2canvas from "html2canvas";
@@ -142,13 +143,13 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
           s.timeSlotId === scheduleData.timeSlotId
         );
         if (existingSchedule) {
-          const response = await apiRequest('DELETE', `/api/schedules/${existingSchedule.id}`);
+          const response = await apiRequestWithConfirm('DELETE', `/api/schedules/${existingSchedule.id}?expectedVersion=${existingSchedule.version}`, {});
           return response.json();
         }
         return null;
       }
       
-      const response = await apiRequest('POST', '/api/schedules', scheduleData);
+      const response = await apiRequestWithConfirm('POST', '/api/schedules', scheduleData);
       return response.json();
     },
     onSuccess: () => {
@@ -178,7 +179,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
 
   const deleteMutation = useMutation({
     mutationFn: async (scheduleId: string) => {
-      const response = await apiRequest('DELETE', `/api/schedules/${scheduleId}`);
+      const response = await apiRequestWithConfirm('DELETE', `/api/schedules/${scheduleId}?expectedVersion=${cachedScheduleVersion(scheduleId) ?? ""}`, {});
       return response.json();
     },
     onSuccess: () => {
@@ -262,9 +263,10 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
       className: string;
       coachName: string;
     }) => {
-      const response = await apiRequest('PUT', `/api/schedules/${updateData.scheduleId}`, {
+      const response = await apiRequestWithConfirm('PUT', `/api/schedules/${updateData.scheduleId}`, {
         className: updateData.className,
         coachName: updateData.coachName,
+        expectedVersion: cachedScheduleVersion(updateData.scheduleId),
       });
       return response.json();
     },
@@ -416,7 +418,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
                         return (
                           <td
                             key={cellKey}
-                            className="schedule-cell p-2 border border-border hover:bg-accent/50 cursor-pointer relative align-top"
+                            className={`schedule-cell p-2 border cursor-pointer relative align-top ${cellSchedules.some(s => isPlaceholderCoach(s.coachName) || isPlaceholderCoach(s.coachName2)) ? "bg-red-200 border-red-600 text-red-950 hover:bg-red-300" : "border-border hover:bg-accent/50"}`}
                             data-testid={`cell-${dayIndex}-${venue.name}-${timeSlot.period}`}
                             style={{ minHeight: '60px', verticalAlign: 'top' }}
                           >
@@ -432,7 +434,7 @@ const WeekScheduleGrid = forwardRef<WeekScheduleGridRef, WeekScheduleGridProps>(
                                 return (
                                   <div 
                                     key={schedule.id} 
-                                    className={`flex items-center justify-between bg-background/50 rounded px-1 py-0.5 text-xs group relative ${isScheduleSaving ? 'opacity-60' : ''}`}
+                                    className={`flex items-center justify-between ${isPlaceholderCoach(schedule.coachName) || isPlaceholderCoach(schedule.coachName2) ? "bg-red-700 text-white" : "bg-background/50"} rounded px-1 py-0.5 text-xs group relative ${isScheduleSaving ? 'opacity-60' : ''}`}
                                     data-testid={`schedule-item-${dayIndex}-${venue.name}-${timeSlot.period}-${index}`}
                                   >
                                     {isScheduleSaving && (

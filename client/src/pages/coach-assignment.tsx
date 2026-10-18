@@ -1,3 +1,4 @@
+import { isRealCoachName, isPlaceholderCoach } from "@shared/scheduleRules";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -16,6 +17,10 @@ import { format, addWeeks, subWeeks, startOfWeek } from "date-fns";
 import { zhTW } from "date-fns/locale";
 import FloatingConflictAlert from "@/components/floating-conflict-alert";
 import AdminLayout from "@/components/admin-layout";
+import { apiRequestWithConfirm, cachedScheduleVersion } from "@/lib/queryClient";
+import { askConfirm } from "@/components/confirm-popup";
+import { assignmentChanges, displayField, failedSaveState, fieldLabels, ordinarySaveReceipt, readScheduleLocation, remainingDraft, scheduleLocation, type AssignmentPatch, type PlanChange, type SaveState } from "@/lib/schedule-ui";
+
 import {
   AlertDialog,
   AlertDialogAction,
@@ -26,7 +31,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import type { Venue, TimeSlot, Schedule, CoachAvailability } from "@shared/schema";
+import type { VenueDto as Venue, TimeSlotDto as TimeSlot, ScheduleDto as Schedule, CoachAvailabilityDto as CoachAvailability } from "@shared/contracts";
 import {
   getExtendedWeekDays,
   getExtendedWeekdayNames,
@@ -35,18 +40,30 @@ import {
 
 type ConflictDetail = { venueName: string; className: string };
 
+export function candidateAvailabilityReason(state: "loading" | "error" | "ready", hasFilledWeek: boolean, coversTime: boolean): string {
+  if (state === "loading") return "可上課時段載入中，尚未確認";
+  if (state === "error") return "可上課時段讀取失敗，尚未確認";
+  if (!hasFilledWeek) return "本週尚未填可上課時段";
+  if (!coversTime) return "本週已填可上課時段，但未登記此時段，送出時需確認";
+  return "已登記此時段";
+}
+
 interface CoachSearchSelectProps {
   value: string;
   onValueChange: (value: string) => void;
   coaches: string[];       // 場館教練（已篩選）
   allCoaches: string[];    // 全部教練（代班模式用）
   available: Set<string>;
+  availabilityFilled: Set<string>;
+  timeAvailable: Set<string>;
+  availabilityState: "loading" | "error" | "ready";
   softConflicts?: Map<string, ConflictDetail[]>; // 跨課衝堂：可點選但需確認
   hardDisabled?: Set<string>;                     // 同筆 schedule 的另一位教練：硬擋
   onSoftConflictSelect?: (coach: string, details: ConflictDetail[]) => void;
   placeholder: string;
   triggerClassName?: string;
   hasValue?: boolean;
+  disabled?: boolean;
 }
 
 function CoachSearchSelect({
@@ -55,12 +72,16 @@ function CoachSearchSelect({
   coaches,
   allCoaches,
   available,
+  availabilityFilled,
+  timeAvailable,
+  availabilityState,
   softConflicts,
   hardDisabled,
   onSoftConflictSelect,
   placeholder,
   triggerClassName = "",
   hasValue = false,
+  disabled = false,
 }: CoachSearchSelectProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -118,15 +139,16 @@ function CoachSearchSelect({
   };
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className="relative min-w-0">
       <button
         type="button"
+        disabled={disabled}
         onClick={() => setOpen((o) => !o)}
-        className={`w-full h-7 text-xs px-2 rounded border flex items-center justify-between gap-1 ${triggerClassName}`}
+        className={`coach-select-trigger w-full text-xs px-2 py-1 rounded border flex items-center justify-between gap-1 ${triggerClassName}`}
       >
-        <div className="flex items-center gap-1 min-w-0">
+        <div className="flex items-start gap-1 min-w-0 flex-1">
           {hasValue && <Check className="h-3 w-3 flex-shrink-0 text-green-600" />}
-          <span className={`flex-1 min-w-0 truncate ${value ? "" : "text-gray-400"}`}>
+          <span className={`coach-select-name min-w-0 ${value ? "" : "text-gray-400"}`}>
             {value || placeholder}
           </span>
         </div>
@@ -141,7 +163,7 @@ function CoachSearchSelect({
       </button>
 
       {open && (
-        <div className="absolute z-50 top-full left-0 mt-0.5 min-w-[220px] w-max max-w-[320px] bg-white border border-gray-200 rounded shadow-lg">
+        <div className="coach-select-menu absolute z-50 top-full left-0 mt-0.5 bg-white border border-gray-200 rounded shadow-lg">
           {substituteMode && (
             <div className="px-2 py-1 text-[10px] text-orange-600 font-medium bg-orange-50 border-b border-orange-100 flex items-center justify-between">
               <span>代班模式：顯示全部教練</span>
@@ -184,7 +206,7 @@ function CoachSearchSelect({
                     >
                       {isSoft ? "⚠️" : "✅"} {coach}
                       {isHard ? " (同筆)" : isSoft ? " (衝堂)" : ""}
-                    </button>
+                    <span className="block text-[10px] font-normal">{isHard ? '同堂已指派，不能重複' : isSoft ? (softConflicts?.get(coach) ?? []).map((item) => item.venueName + '／' + item.className).join('、') : candidateAvailabilityReason(availabilityState, availabilityFilled.has(coach), timeAvailable.has(coach))}</span></button>
                   );
                 })}
               </>
@@ -211,7 +233,7 @@ function CoachSearchSelect({
                     >
                       {isSoft ? "⚠️ " : ""}{coach}
                       {isHard ? " (同筆)" : isSoft ? " (衝堂)" : ""}
-                    </button>
+                    <span className="block text-[10px] font-normal">{isHard ? '同堂已指派，不能重複' : isSoft ? (softConflicts?.get(coach) ?? []).map((item) => item.venueName + '／' + item.className).join('、') : candidateAvailabilityReason(availabilityState, availabilityFilled.has(coach), timeAvailable.has(coach))}</span></button>
                   );
                 })}
               </>
@@ -254,10 +276,20 @@ function CoachSearchSelect({
 function CoachAssignmentContent() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [selectedVenue, setSelectedVenue] = useState<string>("");
-  const [currentWeek, setCurrentWeek] = useState<Date>(() =>
-    startOfWeek(new Date(), { weekStartsOn: 1 })
-  );
+
+  const initialLocation = useRef(readScheduleLocation(typeof window !== "undefined" ? window.location.search : ""));
+  const locationRestoring = useRef(false), locationInitialized = useRef(false);
+  const [selectedVenue, setSelectedVenue] = useState(initialLocation.current.venueId);
+  const [currentWeek, setCurrentWeek] = useState<Date>(initialLocation.current.week);
+  const [assignmentDrafts, setAssignmentDrafts] = useState<Record<string, AssignmentPatch>>({});
+  const draftsRef = useRef(assignmentDrafts); draftsRef.current = assignmentDrafts;
+  const [draftBases, setDraftBases] = useState<Record<string, object>>({});
+  const [assignmentSaveState, setAssignmentSaveState] = useState<Record<string, SaveState>>({});
+  const [assignmentErrors, setAssignmentErrors] = useState<Record<string, string>>({});
+  const [savedChanges, setSavedChanges] = useState<Record<string, PlanChange[]>>({});
+  const rowRevisions = useRef<Record<string, number>>({});
+  const assignmentFieldRevisions = useRef<Record<string, Record<string, number>>>({});
+  const assignmentPending = useRef<Record<string, Set<number>>>({});
   const [selectedCell, setSelectedCell] = useState<{
     date: string;
     timeSlotId: string;
@@ -271,24 +303,48 @@ function CoachAssignmentContent() {
     onConfirm: () => void;
   } | null>(null);
 
-  const { data: venues } = useQuery<Venue[]>({ queryKey: ["/api/venues"] });
-  const { data: timeSlots } = useQuery<TimeSlot[]>({ queryKey: ["/api/time-slots"] });
+  const { data: venues, isError: venuesError, refetch: refetchVenues } = useQuery<Venue[]>({ queryKey: ["/api/venues"] });
+  const { data: timeSlots, isError: timeSlotsError, refetch: refetchTimeSlots } = useQuery<TimeSlot[]>({ queryKey: ["/api/time-slots"] });
 
   const weekStart = format(currentWeek, "yyyy-MM-dd");
   const weekEnd = format(getExtendedWeekEnd(currentWeek), "yyyy-MM-dd");
+  // This page intentionally displays weekdays only. Keep weekEnd on Sunday so
+  // weekend records remain loaded for conflict checks and are never modified.
+  const displayedWeekDays = useMemo(
+    () => getExtendedWeekDays(currentWeek).slice(0, 5),
+    [currentWeek]
+  );
+  const displayedWeekDayNames = useMemo(
+    () => getExtendedWeekdayNames(currentWeek).slice(0, 5),
+    [currentWeek]
+  );
 
-  const { data: schedules = [] } = useQuery<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]>({
+  useEffect(() => { if (venues?.length && !venues.some((venue) => venue.id === selectedVenue)) setSelectedVenue(venues[0].id); }, [venues, selectedVenue]);
+
+  useEffect(() => {
+    const restore = () => { const state = readScheduleLocation(window.location.search); locationRestoring.current = true; setSelectedVenue(state.venueId); setCurrentWeek(state.week); };
+    window.addEventListener("popstate", restore); return () => window.removeEventListener("popstate", restore);
+  }, []);
+  useEffect(() => {
+    if (!selectedVenue) return;
+    if (locationRestoring.current) { locationRestoring.current = false; locationInitialized.current = true; return; }
+    const next = scheduleLocation(window.location.pathname, selectedVenue, currentWeek);
+    if (next !== window.location.pathname + window.location.search) window.history[locationInitialized.current ? "pushState" : "replaceState"](null, "", next);
+    locationInitialized.current = true;
+  }, [selectedVenue, currentWeek]);
+
+  const { data: schedules = [], isLoading: schedulesLoading, isError: schedulesError, refetch: refetchSchedules } = useQuery<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]>({
     queryKey: [`/api/schedules?startDate=${weekStart}&endDate=${weekEnd}&venueId=${selectedVenue}`],
     enabled: !!selectedVenue,
   });
 
-  const { data: allSchedules = [] } = useQuery<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]>({
+  const { data: allSchedules = [], isError: conflictsError, refetch: refetchConflicts } = useQuery<(Schedule & { venue: Venue; timeSlot: TimeSlot })[]>({
     queryKey: [`/api/schedules?startDate=${weekStart}&endDate=${weekEnd}`],
   });
 
   const { data: coaches = [] } = useQuery<string[]>({ queryKey: ["/api/approved-coaches"] });
 
-  const { data: availability = [] } = useQuery<CoachAvailability[]>({
+  const { data: availability = [], isLoading: availabilityLoading, isError: availabilityError, refetch: refetchAvailability } = useQuery<CoachAvailability[]>({
     queryKey: ["/api/coach-availability", weekStart],
     queryFn: async () => {
       const res = await fetch(`/api/coach-availability?weekStart=${weekStart}`);
@@ -297,12 +353,12 @@ function CoachAssignmentContent() {
     },
   });
 
-  const { data: venuePrefsMap = {} } = useQuery<Record<string, string[]>>({
+  const { data: venuePrefsMap = {}, isError: venuePrefsError, refetch: refetchVenuePrefs } = useQuery<Record<string, string[]>>({
     queryKey: ["/api/admin/coach-venue-preferences"],
     queryFn: async () => {
       const password = sessionStorage.getItem("admin-password") || "";
-      const res = await fetch(`/api/admin/coach-venue-preferences?password=${password}`);
-      if (!res.ok) return {};
+      const res = await fetch("/api/admin/coach-venue-preferences", { headers: { "x-admin-password": password } });
+      if (!res.ok) throw new Error("場館偏好讀取失敗");
       return res.json();
     },
   });
@@ -317,6 +373,9 @@ function CoachAssignmentContent() {
     return map;
   }, [availability]);
 
+  const availabilityFilled = useMemo(() => new Set(availability.map((entry) => entry.coachName)), [availability]);
+  const availabilityState = availabilityError ? "error" : availabilityLoading ? "loading" : "ready";
+
   const getAvailableCoaches = (dayOfWeek: number, timeSlotOrder: number, venueName?: string): Set<string> => {
     const timeAvailable = availabilityMap.get(`${dayOfWeek}-${timeSlotOrder}`) || new Set<string>();
     if (!venueName) return timeAvailable;
@@ -329,19 +388,23 @@ function CoachAssignmentContent() {
     return result;
   };
 
+  // Same coach at another venue in the same period; the same venue is fine.
   const getConflictingCoaches = (
     date: string,
     timeSlotId: string,
-    currentScheduleId: string
+    currentScheduleId: string,
+    venueId: string
   ): Map<string, ConflictDetail[]> => {
     const conflicting = new Map<string, ConflictDetail[]>();
     const push = (name: string, detail: ConflictDetail) => {
+      if (!isRealCoachName(name)) return;
       const arr = conflicting.get(name);
       if (arr) arr.push(detail);
       else conflicting.set(name, [detail]);
     };
     allSchedules.forEach((s) => {
       if (s.id === currentScheduleId || s.date !== date || s.timeSlotId !== timeSlotId) return;
+      if (s.venueId === venueId) return;
       const detail: ConflictDetail = {
         venueName: s.venue?.name || "",
         className: s.className || "(未命名班級)",
@@ -353,16 +416,16 @@ function CoachAssignmentContent() {
   };
 
   const getCoach1Conflicts = (schedule: Schedule & { venue: Venue; timeSlot: TimeSlot }) => {
-    const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id);
+    const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id, schedule.venueId);
     const hardDisabled = new Set<string>();
-    if (schedule.coachName2) hardDisabled.add(schedule.coachName2);
+    if (isRealCoachName(schedule.coachName2)) hardDisabled.add(schedule.coachName2);
     return { softConflicts, hardDisabled };
   };
 
   const getCoach2Conflicts = (schedule: Schedule & { venue: Venue; timeSlot: TimeSlot }) => {
-    const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id);
+    const softConflicts = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id, schedule.venueId);
     const hardDisabled = new Set<string>();
-    if (schedule.coachName) hardDisabled.add(schedule.coachName);
+    if (isRealCoachName(schedule.coachName)) hardDisabled.add(schedule.coachName);
     return { softConflicts, hardDisabled };
   };
 
@@ -370,58 +433,101 @@ function CoachAssignmentContent() {
     const assigned = new Set<string>();
     allSchedules.forEach((s) => {
       if (s.date !== date || s.timeSlotId !== timeSlotId) return;
-      if (s.coachName) assigned.add(s.coachName);
-      if (s.coachName2) assigned.add(s.coachName2);
+      if (isRealCoachName(s.coachName)) assigned.add(s.coachName);
+      if (isRealCoachName(s.coachName2)) assigned.add(s.coachName2);
     });
     return assigned;
   };
 
   const assignCoachMutation = useMutation({
+    onMutate: (variables) => {
+      const { scheduleId, confirmWarnings: _warnings, ...patch } = variables;
+      const row = schedules.find((item) => item.id === scheduleId);
+      const before = { coachName: row?.coachName ?? null, coachName2: row?.coachName2 ?? null, coach1IsTeaching: row?.coach1IsTeaching ?? true, coach2IsTeaching: row?.coach2IsTeaching ?? false };
+      const wasDirty = !!draftsRef.current[scheduleId];
+      const next = { ...draftsRef.current, [scheduleId]: { ...draftsRef.current[scheduleId], ...patch } };
+      draftsRef.current = next; setAssignmentDrafts(next);
+      setDraftBases((previous) => ({ ...previous, [scheduleId]: wasDirty ? previous[scheduleId] ?? before : before }));
+      setAssignmentSaveState((previous) => ({ ...previous, [scheduleId]: "saving" }));
+      setAssignmentErrors((previous) => ({ ...previous, [scheduleId]: "" }));
+      const revision = (rowRevisions.current[scheduleId] ?? 0) + 1; rowRevisions.current[scheduleId] = revision;
+      const fields = assignmentFieldRevisions.current[scheduleId] ??= {};
+      for (const field of Object.keys(patch)) fields[field] = revision;
+      (assignmentPending.current[scheduleId] ??= new Set()).add(revision);
+      return { patch, before, revision };
+    },
+
     mutationFn: async ({
-      scheduleId, coachName, coachName2, coach1IsTeaching, coach2IsTeaching,
+      scheduleId, coachName, coachName2, coach1IsTeaching, coach2IsTeaching, confirmWarnings,
     }: {
       scheduleId: string;
       coachName?: string;
       coachName2?: string;
       coach1IsTeaching?: boolean;
       coach2IsTeaching?: boolean;
+      confirmWarnings?: string[];
     }) => {
-      const adminPassword = sessionStorage.getItem("admin-password") || "";
-      const body: any = {};
+      const body: Record<string, unknown> = {};
       if (coachName !== undefined) body.coachName = coachName;
       if (coachName2 !== undefined) body.coachName2 = coachName2;
       if (coach1IsTeaching !== undefined) body.coach1IsTeaching = coach1IsTeaching;
       if (coach2IsTeaching !== undefined) body.coach2IsTeaching = coach2IsTeaching;
-      const res = await fetch(`/api/schedules/${scheduleId}/assign-coach`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "x-admin-password": adminPassword },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(await res.text());
+      body.expectedVersion = cachedScheduleVersion(scheduleId);
+      // This page shows its own 衝堂提醒 before assigning, so the server's
+      // conflict check is pre-confirmed; availability is still asked.
+      const res = await apiRequestWithConfirm(
+        "PUT",
+        `/api/schedules/${scheduleId}/assign-coach`,
+        body,
+        confirmWarnings,
+      );
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        predicate: (query) =>
-          typeof query.queryKey[0] === "string" &&
-          (query.queryKey[0].includes("/api/schedules") || query.queryKey[0].includes("/api/conflicts")),
-      });
+    onSuccess: (saved, variables, context) => {
+      const id = variables.scheduleId;
+      if (context) {
+        assignmentPending.current[id]?.delete(context.revision);
+        // A response may acknowledge only fields still owned by that submission.
+        const acknowledged = Object.fromEntries(Object.entries(context.patch).filter(([field]) => assignmentFieldRevisions.current[id]?.[field] === context.revision));
+        const remaining = remainingDraft(draftsRef.current[id] ?? {}, acknowledged);
+        const next = { ...draftsRef.current };
+        const hasDraft = Object.keys(remaining).length > 0;
+        if (hasDraft) next[id] = remaining; else delete next[id];
+        draftsRef.current = next; setAssignmentDrafts(next);
+        const waiting = !!assignmentPending.current[id]?.size;
+        const state: SaveState = waiting ? "saving" : hasDraft ? "dirty" : "saved";
+        setAssignmentSaveState((previous) => ({ ...previous, [id]: state }));
+        if (state === "saved") setAssignmentErrors((previous) => ({ ...previous, [id]: "" }));
+        if (context.revision === rowRevisions.current[id]) {
+          setSavedChanges((previous) => ({ ...previous, [id]: assignmentChanges(context.before, saved) }));
+        }
+        if (!waiting) toast(state === "saved"
+          ? { title: "課表已儲存", description: ordinarySaveReceipt }
+          : { title: "本次變更已儲存", description: "仍有尚未儲存的選擇，請確認後重試；未安排通知。" });
+      }
+      queryClient.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && (query.queryKey[0].includes("/api/schedules") || query.queryKey[0].includes("/api/conflicts")) });
+      queryClient.invalidateQueries({ predicate: (query) => String(query.queryKey[0]).includes("/api/statistics") });
       localStorage.setItem("scheduleLastModified", Date.now().toString());
-      toast({ title: "指派成功", description: "教練已更新，將於上課前一天推播通知" });
     },
-    onError: (error) => {
-      toast({ title: "指派失敗", description: error.message, variant: "destructive" });
+    onError: (error, variables, context) => {
+      const id = variables.scheduleId;
+      if (context) assignmentPending.current[id]?.delete(context.revision);
+      const ownsFailedDraft = !context || Object.keys(context.patch).some((field) =>
+        assignmentFieldRevisions.current[id]?.[field] === context.revision && Object.prototype.hasOwnProperty.call(draftsRef.current[id] ?? {}, field));
+      const hasDraft = Object.keys(draftsRef.current[id] ?? {}).length > 0;
+      const state: SaveState = assignmentPending.current[id]?.size ? "saving" : hasDraft ? (ownsFailedDraft ? failedSaveState(error) : "dirty") : context ? "saved" : "error";
+      setAssignmentSaveState((previous) => ({ ...previous, [id]: state }));
+      if (ownsFailedDraft) {
+        setAssignmentErrors((previous) => ({ ...previous, [id]: error.message }));
+        toast({ title: failedSaveState(error) === "conflict" ? "版本衝突，草稿已保留" : "儲存失敗，草稿已保留", description: error.message, variant: "destructive" });
+      }
     },
   });
 
-  useEffect(() => {
-    if (venues && venues.length > 0 && !selectedVenue) {
-      setSelectedVenue(venues[0].id);
-    }
-  }, [venues, selectedVenue]);
+
 
   const schedulesByDateAndTime: Record<string, Record<string, (Schedule & { venue: Venue; timeSlot: TimeSlot })[]>> = {};
-  schedules.forEach((schedule) => {
+  schedules.map((row) => ({ ...row, ...assignmentDrafts[row.id] })).forEach((schedule) => {
     if (schedule.venue.id === selectedVenue) {
       if (!schedulesByDateAndTime[schedule.date]) schedulesByDateAndTime[schedule.date] = {};
       if (!schedulesByDateAndTime[schedule.date][schedule.timeSlotId])
@@ -437,8 +543,8 @@ function CoachAssignmentContent() {
       if (stats[a.coachName]) stats[a.coachName].available++;
     }
     for (const s of allSchedules) {
-      if (s.coachName && stats[s.coachName]) stats[s.coachName].assigned++;
-      if (s.coachName2 && stats[s.coachName2]) stats[s.coachName2].assigned++;
+      if (isRealCoachName(s.coachName) && stats[s.coachName]) stats[s.coachName].assigned++;
+      if (isRealCoachName(s.coachName2) && stats[s.coachName2]) stats[s.coachName2].assigned++;
     }
     return stats;
   }, [coaches, availability, allSchedules]);
@@ -486,11 +592,11 @@ function CoachAssignmentContent() {
     return scored.sort((a, b) => b.score - a.score).map((x) => x.coach);
   };
 
-  const handleAutoFill = () => {
+  const handleAutoFill = async () => {
     const unfilled = schedules.filter(
       (s) => s.className && s.venue.id === selectedVenue && (!s.coachName || ((s.coachCount || 1) >= 2 && !s.coachName2))
     );
-    let filled = 0;
+    const picks: { scheduleId: string; slot: "coachName" | "coachName2"; coach: string; available: boolean; label: string }[] = [];
     const localCounts: Record<string, number> = {};
     for (const coach of coaches) localCounts[coach] = weeklyStats[coach]?.assigned || 0;
     const venueName = selectedVenueData?.name || "";
@@ -513,17 +619,16 @@ function CoachAssignmentContent() {
       const dayOfWeek = date.getDay() === 0 ? 7 : date.getDay();
       const timeSlotOrder = schedule.timeSlot?.order || 0;
       const timeAvailSet = availabilityMap.get(`${dayOfWeek}-${timeSlotOrder}`) || new Set<string>();
-      const conflictingMap = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id);
+      const conflictingMap = getConflictingCoaches(schedule.date, schedule.timeSlotId, schedule.id, schedule.venueId);
       const conflicting = new Set<string>(conflictingMap.keys());
       let assignedCoach1 = schedule.coachName || "";
       if (!schedule.coachName) {
         const candidates = scoredCandidates(dayOfWeek, timeSlotOrder, venueName, conflicting);
         if (candidates.length > 0) {
           const best = pickBest(candidates, timeAvailSet)!;
-          assignCoachMutation.mutate({ scheduleId: schedule.id, coachName: best });
+          picks.push({ scheduleId: schedule.id, slot: "coachName", coach: best, available: timeAvailSet.has(best), label: `${schedule.date} ${schedule.className || ""}：${best}` });
           localCounts[best] = (localCounts[best] || 0) + 1;
           assignedCoach1 = best;
-          filled++;
         }
       }
       if ((schedule.coachCount || 1) >= 2 && !schedule.coachName2) {
@@ -532,12 +637,29 @@ function CoachAssignmentContent() {
         const candidates2 = scoredCandidates(dayOfWeek, timeSlotOrder, venueName, exclude2);
         if (candidates2.length > 0) {
           const best2 = pickBest(candidates2, timeAvailSet)!;
-          assignCoachMutation.mutate({ scheduleId: schedule.id, coachName2: best2 });
+          picks.push({ scheduleId: schedule.id, slot: "coachName2", coach: best2, available: timeAvailSet.has(best2), label: `${schedule.date} ${schedule.className || ""}：${best2}` });
           localCounts[best2] = (localCounts[best2] || 0) + 1;
-          filled++;
         }
       }
     }
+    // Ask once for the whole batch instead of once per row.
+    const unavailable = picks.filter((pick) => !pick.available);
+    const keepUnavailable =
+      unavailable.length === 0 ||
+      (await askConfirm(
+        `自動指派中有 ${unavailable.length} 筆教練沒有填該時段為可排（取消則只指派有填可排的）`,
+        unavailable.map((pick) => pick.label),
+        "仍要指派",
+      ));
+    const accepted = keepUnavailable ? picks : picks.filter((pick) => pick.available);
+    for (const pick of accepted) {
+      assignCoachMutation.mutate({
+        scheduleId: pick.scheduleId,
+        [pick.slot]: pick.coach,
+        confirmWarnings: ["COACH_CONFLICT", "COACH_UNAVAILABLE"],
+      });
+    }
+    const filled = accepted.length;
     if (filled === 0) {
       toast({ title: "無可用教練", description: "沒有符合條件的教練可自動指派", variant: "destructive" });
     } else {
@@ -559,23 +681,20 @@ function CoachAssignmentContent() {
     : null;
 
   const weekDateLabel = `${format(currentWeek, "yyyy/MM/dd")} - ${format(
-    new Date(currentWeek.getTime() + 4 * 86400000),
+    new Date(currentWeek.getTime() + 6 * 86400000),
     "MM/dd"
   )}`;
 
   const headerCenter = (
     <div className="flex items-center gap-2 flex-nowrap">
       <span className="text-sm font-medium whitespace-nowrap">選擇場館：</span>
-      <Select value={selectedVenue} onValueChange={setSelectedVenue}>
-        <SelectTrigger className="w-36 h-8 text-sm">
-          <SelectValue placeholder="請選擇場館" />
-        </SelectTrigger>
-        <SelectContent>
+      <select value={selectedVenue} onChange={(event) => setSelectedVenue(event.target.value)} className="w-36 h-8 rounded border bg-background px-2 text-sm">
+        <option value="">請選擇場館</option>
           {venues?.map((venue) => (
-            <SelectItem key={venue.id} value={venue.id}>{venue.name}</SelectItem>
+            <option key={venue.id} value={venue.id}>{venue.name}</option>
           ))}
-        </SelectContent>
-      </Select>
+      </select>
+      <span className="text-xs text-muted-foreground">{venues?.find((venue) => venue.id === selectedVenue)?.name || "未選擇"}</span>
       <Button variant="outline" size="icon" className="h-8 w-8"
         onClick={() => setCurrentWeek((prev) => subWeeks(prev, 1))}>
         <ChevronLeft className="h-4 w-4" />
@@ -687,6 +806,7 @@ function CoachAssignmentContent() {
     </div>
   );
 
+  if ((!venues && venuesError) || (!timeSlots && timeSlotsError)) return <div role="alert" className="p-4 text-red-700">場館或節次讀取失敗。<Button variant="outline" onClick={() => { void refetchVenues(); void refetchTimeSlots(); }}>重新載入</Button></div>;
   if (!venues || !timeSlots) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -703,6 +823,11 @@ function CoachAssignmentContent() {
       rightPanel={showRightPanel ? rightPanelContent : undefined}
     >
       <div className="p-4">
+        {schedulesLoading && <div role="status" className="mb-3 text-sm">課表載入中…</div>}
+        {schedulesError && <div role="alert" className="mb-3 rounded border border-red-200 p-2 text-sm text-red-700">課表讀取失敗，選擇與草稿已保留。<Button size="sm" variant="outline" onClick={() => void refetchSchedules()}>重新讀取</Button></div>}
+        {(availabilityError || venuePrefsError) && <div role="alert" className="mb-3 rounded border border-amber-200 p-2 text-sm">可排時段或場館偏好讀取失敗，候選資訊尚未完整。<Button size="sm" variant="outline" onClick={() => { void refetchAvailability(); void refetchVenuePrefs(); }}>重新讀取候選資料</Button></div>}
+        {conflictsError && <div role="alert" className="mb-3 rounded border border-amber-200 p-2 text-sm">衝堂資料讀取失敗，候選資訊可能未更新。<Button size="sm" variant="outline" onClick={() => void refetchConflicts()}>重新讀取候選資料</Button></div>}
+        {selectedVenue && !schedulesLoading && !schedulesError && schedules.length === 0 && <div className="mb-3 rounded border p-3 text-sm">本週尚無課表，請先至學校課表編輯新增課程。</div>}
         {/* Missing coach alert */}
         {missingCoachCount > 0 && (
           <div className="mb-4 flex items-center gap-3 flex-wrap">
@@ -731,35 +856,38 @@ function CoachAssignmentContent() {
         {/* Schedule table */}
         {selectedVenue ? (
           <div className="overflow-x-auto">
-            <table className="w-full border-collapse min-w-[600px]">
+            <table className="coach-assignment-table border-collapse">
+              <colgroup>
+                <col className="time-column" />
+                {displayedWeekDays.map((date) => (
+                  <col key={format(date, "yyyy-MM-dd")} className="weekday-column" />
+                ))}
+              </colgroup>
               <thead className="sticky top-0 z-10">
                 <tr>
-                  <th className="border border-gray-300 p-2 bg-gray-50 w-20 sticky left-0 z-20 shadow-[2px_0_4px_rgba(0,0,0,0.1)]">
+                  <th className="border border-gray-300 p-2 bg-gray-50 w-28 min-w-[112px] sticky left-0 z-20 shadow-[2px_0_4px_rgba(0,0,0,0.1)]">
                     節次/時間
                   </th>
-                  {getExtendedWeekDays(currentWeek).map((date, index) => {
-                    const weekDayNames = getExtendedWeekdayNames(currentWeek);
-                    return (
-                      <th key={index} className="border border-gray-300 p-2 bg-gray-50 min-w-36">
-                        <div className="text-center">
-                          <div className="font-semibold">{weekDayNames[index]}</div>
-                          <div className="text-sm text-gray-600">{format(date, "MM/dd")}</div>
-                        </div>
-                      </th>
-                    );
-                  })}
+                  {displayedWeekDays.map((date, index) => (
+                    <th key={format(date, "yyyy-MM-dd")} className="schedule-column border border-gray-300 p-2 bg-gray-50">
+                      <div className="text-center">
+                        <div className="font-semibold">{displayedWeekDayNames[index]}</div>
+                        <div className="text-sm text-gray-600">{format(date, "MM/dd")}</div>
+                      </div>
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {timeSlots.map((timeSlot) => (
                   <tr key={timeSlot.id}>
-                    <td className="border border-gray-300 p-2 bg-gray-50 text-center sticky left-0 z-10 shadow-[2px_0_4px_rgba(0,0,0,0.1)]">
+                    <td className="border border-gray-300 p-2 bg-gray-50 text-center sticky left-0 z-10 shadow-[2px_0_4px_rgba(0,0,0,0.1)] w-28 min-w-[112px]">
                       <div className="font-medium">{timeSlot.period}</div>
                       <div className="text-xs text-gray-600">
                         {timeSlot.startTime}-{timeSlot.endTime}
                       </div>
                     </td>
-                    {getExtendedWeekDays(currentWeek).map((date, index) => {
+                    {displayedWeekDays.map((date, index) => {
                       const dateStr = format(date, "yyyy-MM-dd");
                       const daySchedules = schedulesByDateAndTime[dateStr]?.[timeSlot.id] || [];
                       const dayOfWeek = date.getDay() === 0 ? 7 : date.getDay();
@@ -769,10 +897,9 @@ function CoachAssignmentContent() {
                       return (
                         <td
                           key={`${timeSlot.id}-${index}`}
-                          className={`border border-gray-300 p-1 align-top cursor-pointer transition-colors ${
+                          className={`assignment-cell border border-gray-300 p-1 align-top cursor-pointer transition-colors ${
                             isSelected ? "ring-2 ring-inset ring-blue-400 bg-blue-50/30" : ""
                           }`}
-                          style={{ minHeight: "80px", verticalAlign: "top" }}
                           onClick={() =>
                             setSelectedCell({
                               date: dateStr,
@@ -781,8 +908,8 @@ function CoachAssignmentContent() {
                             })
                           }
                         >
-                          {/* Schedule cards: single col on mobile, 2-col grid on md+ when 2+ classes */}
-                          <div className={`min-h-[80px] gap-1 ${daySchedules.length >= 2 ? "flex flex-col md:grid md:grid-cols-2" : "flex flex-col"}`}>
+                          {/* Keep cards stacked so each card retains enough width for names and controls. */}
+                          <div className="flex flex-col gap-1">
                             {daySchedules.map((schedule) => {
                               if (!schedule.className) return null;
                               const hasCoach = !!schedule.coachName;
@@ -795,9 +922,16 @@ function CoachAssignmentContent() {
                                 timeSlot.order,
                                 selectedVenueData?.name
                               );
+                              const timeAvailable = availabilityMap.get(`${dayOfWeek}-${timeSlot.order}`) ?? new Set<string>();
                               const isMissing = !hasCoach || (needsTwo && !hasCoach2);
                               const isCardSelected = selectedScheduleId === schedule.id;
-                              const missingBg = isMissing
+                              const rowState = assignmentSaveState[schedule.id], rowDraft = assignmentDrafts[schedule.id];
+                              const originalRow = schedules.find((row) => row.id === schedule.id) ?? schedule;
+                              const rowChanges = rowDraft ? assignmentChanges(draftBases[schedule.id] ?? originalRow, schedule) : savedChanges[schedule.id] ?? [];
+                              const isUnstaffed = isPlaceholderCoach(schedule.coachName) || isPlaceholderCoach(schedule.coachName2);
+                              const missingBg = isUnstaffed
+                                ? "bg-red-200 border-2 border-red-600 text-red-950"
+                                : isMissing
                                 ? !hasCoach
                                   ? "bg-red-50 border border-red-200"
                                   : "bg-amber-50 border border-amber-200"
@@ -811,74 +945,68 @@ function CoachAssignmentContent() {
                                     setSelectedCell({ date: dateStr, timeSlotId: timeSlot.id, timeSlotOrder: timeSlot.order });
                                     setSelectedScheduleId(isCardSelected ? null : schedule.id);
                                   }}
-                                  className={`rounded p-1.5 space-y-1 cursor-pointer transition-all ${missingBg} ${
+                                  className={`assignment-card rounded p-1 space-y-1 cursor-pointer transition-all ${missingBg} ${
                                     isCardSelected ? "ring-2 ring-blue-500 shadow-md" : "hover:shadow-sm"
                                   }`}
                                 >
-                                  <div className="bg-gray-700 text-white text-xs font-bold px-2 py-1 rounded text-center truncate flex items-center justify-center gap-1">
-                                    {schedule.className}
-                                    {needsTwo && <span className="text-[9px] opacity-75">(2位)</span>}
+                                  <div className={`${isUnstaffed ? "bg-red-700" : "bg-gray-700"} text-white text-xs px-1.5 py-0.5 rounded text-center break-words whitespace-normal leading-4`}>
+                                    <span className="font-bold">{schedule.className}</span>
+                                    <span className="font-normal opacity-90">｜需{schedule.coachCount || 1}位</span>
                                   </div>
-                                  <CoachSearchSelect
-                                    value={schedule.coachName || ""}
-                                    onValueChange={(value) => {
-                                      assignCoachMutation.mutate({
-                                        scheduleId: schedule.id,
-                                        coachName: value === "__clear__" ? "" : value,
-                                      });
-                                    }}
-                                    coaches={venueEligibleCoaches}
-                                    allCoaches={coaches}
-                                    available={available}
-                                    softConflicts={coach1Info.softConflicts}
-                                    hardDisabled={coach1Info.hardDisabled}
-                                    onSoftConflictSelect={(coach, details) =>
-                                      setConflictConfirm({
-                                        coach,
-                                        details,
-                                        onConfirm: () =>
-                                          assignCoachMutation.mutate({
-                                            scheduleId: schedule.id,
-                                            coachName: coach,
-                                          }),
-                                      })
-                                    }
-                                    placeholder="教練1"
-                                    hasValue={hasCoach}
-                                    triggerClassName={
-                                      hasCoach ? "border-green-400 bg-green-50" : "border-red-400 bg-red-50"
-                                    }
-                                  />
-                                  {hasCoach && (
-                                    <label
-                                      className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
-                                      onClick={(e) => e.stopPropagation()}
-                                    >
-                                      <input
-                                        type="checkbox"
-                                        checked={!!schedule.coach1IsTeaching}
+                                  <div className="coach-assignment-row">
+                                    <CoachSearchSelect
+                                      value={schedule.coachName || ""}
+                                      onValueChange={(value) => {
+                                        assignCoachMutation.mutate({
+                                          scheduleId: schedule.id,
+                                          coachName: value === "__clear__" ? "" : value,
+                                        });
+                                      }}
+                                      coaches={venueEligibleCoaches}
+                                      allCoaches={coaches}
+                                      available={available}
+                                      availabilityFilled={availabilityFilled}
+                                      timeAvailable={timeAvailable}
+                                      availabilityState={availabilityState}
+                                      softConflicts={coach1Info.softConflicts}
+                                      hardDisabled={coach1Info.hardDisabled}
+                                      onSoftConflictSelect={(coach, details) =>
+                                        setConflictConfirm({
+                                          coach,
+                                          details,
+                                          onConfirm: () =>
+                                            assignCoachMutation.mutate({
+                                              scheduleId: schedule.id,
+                                              coachName: coach,
+                                            }),
+                                        })
+                                      }
+                                      placeholder="教練1"
+                                      disabled={rowState === "saving"}
+                                      hasValue={hasCoach}
+                                      triggerClassName={
+                                        isPlaceholderCoach(schedule.coachName)
+                                          ? "border-red-600 bg-red-100 text-red-950"
+                                          : hasCoach ? "border-green-400 bg-green-50" : "border-red-400 bg-red-50"
+                                      }
+                                    />
+                                    {hasCoach && (
+                                      <select
+                                        aria-label={`${schedule.className} 第一位教練角色`}
+                                        value={schedule.coach1IsTeaching ? "teaching" : "assist"}
                                         onChange={(e) => {
-                                          e.stopPropagation();
                                           assignCoachMutation.mutate({
                                             scheduleId: schedule.id,
-                                            coach1IsTeaching: e.target.checked,
+                                            coach1IsTeaching: e.target.value === "teaching",
                                           });
                                         }}
-                                        className="h-3 w-3 rounded border-gray-300"
-                                      />
-                                      <span
-                                        className={`text-[10px] ${
-                                          schedule.coach1IsTeaching
-                                            ? "text-blue-600 font-semibold"
-                                            : "text-gray-400"
-                                        }`}
-                                      >
-                                        當班教學
-                                      </span>
-                                    </label>
-                                  )}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="coach-role-select h-8 rounded border bg-white px-1 text-xs"
+                                       disabled={rowState === "saving"}><option value="teaching">當班教學</option><option value="assist">協同教學</option></select>
+                                    )}
+                                  </div>
                                   {needsTwo && (
-                                    <>
+                                    <div className="coach-assignment-row">
                                       <CoachSearchSelect
                                         value={schedule.coachName2 || ""}
                                         onValueChange={(value) => {
@@ -890,6 +1018,9 @@ function CoachAssignmentContent() {
                                         coaches={venueEligibleCoaches}
                                         allCoaches={coaches}
                                         available={available}
+                                        availabilityFilled={availabilityFilled}
+                                        timeAvailable={timeAvailable}
+                                        availabilityState={availabilityState}
                                         softConflicts={coach2Info.softConflicts}
                                         hardDisabled={coach2Info.hardDisabled}
                                         onSoftConflictSelect={(coach, details) =>
@@ -904,44 +1035,48 @@ function CoachAssignmentContent() {
                                           })
                                         }
                                         placeholder="教練2"
+                                        disabled={rowState === "saving"}
                                         hasValue={hasCoach2}
                                         triggerClassName={
-                                          hasCoach2
+                                          isPlaceholderCoach(schedule.coachName2)
+                                            ? "border-red-600 bg-red-100 text-red-950"
+                                            : hasCoach2
                                             ? "border-blue-400 bg-blue-50"
                                             : "border-amber-400 bg-amber-50"
                                         }
                                       />
                                       {hasCoach2 && (
-                                        <label
-                                          className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
+                                        <select
+                                          aria-label={`${schedule.className} 第二位教練角色`}
+                                          value={schedule.coach2IsTeaching ? "teaching" : "assist"}
+                                          onChange={(e) => {
+                                            assignCoachMutation.mutate({
+                                              scheduleId: schedule.id,
+                                              coach2IsTeaching: e.target.value === "teaching",
+                                            });
+                                          }}
                                           onClick={(e) => e.stopPropagation()}
-                                        >
-                                          <input
-                                            type="checkbox"
-                                            checked={!!schedule.coach2IsTeaching}
-                                            onChange={(e) => {
-                                              e.stopPropagation();
-                                              assignCoachMutation.mutate({
-                                                scheduleId: schedule.id,
-                                                coach2IsTeaching: e.target.checked,
-                                              });
-                                            }}
-                                            className="h-3 w-3 rounded border-gray-300"
-                                          />
-                                          <span
-                                            className={`text-[10px] ${
-                                              schedule.coach2IsTeaching
-                                                ? "text-blue-600 font-semibold"
-                                                : "text-gray-400"
-                                            }`}
-                                          >
-                                            當班教學
-                                          </span>
-                                        </label>
+                                          className="coach-role-select h-8 rounded border bg-white px-1 text-xs"
+                                         disabled={rowState === "saving"}><option value="teaching">當班教學</option><option value="assist">協同教學</option></select>
                                       )}
-                                    </>
+                                    </div>
                                   )}
-                                </div>
+                                {rowState && <div className="mt-2 rounded border bg-white/80 p-2 text-xs space-y-1" data-testid="assignment-receipt" data-state={rowState} onClick={(event) => event.stopPropagation()}>
+  <div role="status" className={rowState === 'error' || rowState === 'conflict' ? 'text-red-700 font-medium' : 'font-medium'}>
+    {rowState === 'saving' ? '儲存中，尚未確認寫入' : rowState === 'saved' ? ordinarySaveReceipt : rowState === 'dirty' ? '仍有尚未儲存的選擇，請確認後重試；未安排通知。' : rowState === 'conflict' ? '版本衝突：選擇已保留，請重新讀取現況後確認。' : '儲存失敗：選擇已保留。'}
+  </div>
+  {rowChanges.map((change) => <div key={change.field}>{fieldLabels[change.field] ?? change.field}：{displayField(change.before)} → <strong>{displayField(change.after)}</strong></div>)}
+  {assignmentErrors[schedule.id] && <div role="alert">{assignmentErrors[schedule.id]}</div>}
+  {(rowState === 'dirty' || rowState === 'error' || rowState === 'conflict') && rowDraft && <div className="flex gap-2 flex-wrap pt-1">
+    <Button size="sm" variant="outline" onClick={() => { void refetchSchedules(); void refetchConflicts(); }}>重新讀取現況（保留選擇）</Button>
+    <Button size="sm" onClick={() => assignCoachMutation.mutate({ scheduleId: schedule.id, ...rowDraft })}>確認重試</Button>
+    <Button size="sm" variant="ghost" onClick={() => {
+      const next = { ...draftsRef.current }; delete next[schedule.id]; draftsRef.current = next; setAssignmentDrafts(next);
+      setAssignmentSaveState((previous) => { const state = { ...previous }; delete state[schedule.id]; return state; });
+    }}>捨棄選擇</Button>
+  </div>}
+</div>}
+</div>
                               );
                             })}
                           </div>

@@ -12,6 +12,7 @@
  * still run; the watchdog is observability, not a precondition.
  */
 import { env } from "../../config/env";
+import { currentOperation, remainingOperationMs } from '../../shared/http/operationScope';
 
 const TIMEOUT_MS = 5_000;
 
@@ -22,7 +23,10 @@ function baseUrl(): string | null {
 
 async function safeGet(url: string, body?: string): Promise<void> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const parent=currentOperation()?.signal;
+  if(parent?.aborted || remainingOperationMs(TIMEOUT_MS,1500)<1) return;
+  const abort=()=>ctrl.abort(); parent?.addEventListener('abort',abort,{once:true});
+  const timer = setTimeout(() => ctrl.abort(), remainingOperationMs(TIMEOUT_MS,1500));
   try {
     const res = await fetch(url, {
       method: body ? "POST" : "GET",
@@ -31,12 +35,13 @@ async function safeGet(url: string, body?: string): Promise<void> {
       signal: ctrl.signal,
     });
     if (!res.ok) {
-      console.warn(`[healthchecks] ${url} returned ${res.status}`);
+      console.warn(`[healthchecks] ping HTTP ${res.status}`);
     }
   } catch (err) {
-    console.warn(`[healthchecks] ping failed for ${url}:`, err);
+    console.warn('[healthchecks] ping failed');
   } finally {
     clearTimeout(timer);
+    parent?.removeEventListener('abort',abort);
   }
 }
 

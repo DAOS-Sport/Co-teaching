@@ -47,6 +47,16 @@ const resolveAdminPassword = (): string => {
 
 const ADMIN_PASSWORD = resolveAdminPassword();
 
+const resolveTeacherTokenSecret = (): string => {
+  const value = process.env.TEACHER_TOKEN_SECRET;
+  if (value) return value;
+  if (PROD) {
+    throw new Error("[config] TEACHER_TOKEN_SECRET must be set in production");
+  }
+  console.warn("[config] TEACHER_TOKEN_SECRET not set; using development fallback");
+  return "dev-teacher-token-secret-change-me";
+};
+
 export const env = {
   isProduction: PROD,
   isDeployment: isDeployment(),
@@ -83,6 +93,7 @@ export const env = {
   // Shared secret protecting the teacher portal feedback endpoints. Optional
   // in dev (warns on first request); required in production deployments.
   teacherPortalToken: process.env.TEACHER_PORTAL_TOKEN || null,
+  teacherTokenSecret: resolveTeacherTokenSecret(),
   // LINE user id of the admin who should receive coach-portal login
   // failure alerts (e.g. when an unknown name attempts to register).
   // Optional — when unset the alert is downgraded to a console.warn so
@@ -106,5 +117,8 @@ export function validateConfig(): void {
   }
   if (!env.databaseUrl) {
     throw new Error("[config] DATABASE_URL is required");
+  }
+  if (env.isProduction && !process.env.TEACHER_TOKEN_SECRET) {
+    throw new Error("[config] TEACHER_TOKEN_SECRET env var is required in production");
   }
 }

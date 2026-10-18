@@ -45,92 +45,65 @@ export function schoolSchemaName(schoolCode: string): string {
  * 根據學校代碼獲取對應的資料庫連線
  * 使用不同的 schema 來隔離各學校資料
  */
+export class SchoolDatabaseError extends Error {
+  constructor(
+    readonly code: "SCHOOL_SCHEMA_MISSING" | "SCHOOL_SCHEMA_CHECK_FAILED",
+    message: string,
+    cause?: unknown,
+  ) {
+    super(message, { cause });
+    this.name = "SchoolDatabaseError";
+  }
+}
+
+/** Never fall through to public when a school table is missing. */
+export function schoolConnectionOptions(schemaName: string): string {
+  if (!/^school_[A-Za-z0-9_]+$/.test(schemaName)) throw new Error("INVALID_SCHOOL_SCHEMA");
+  return `-c search_path=${schemaName}`;
+}
+
 export async function getSchoolDb(schoolCode: string) {
   assertSchoolCode(schoolCode);
   const schemaName = schoolSchemaName(schoolCode);
-  const cacheKey = schoolCode;
 
-  if (schemaPools.has(cacheKey)) {
-    return schemaPools.get(cacheKey)!;
-  }
+  const cached = schemaPools.get(schoolCode);
+  if (cached) return cached;
 
-  // 檢查資料庫連接是否可用
   if (!process.env.DATABASE_URL) {
-    throw new Error(`❌ DATABASE_URL not configured. Please set up database for school: ${schoolCode}`);
+    throw new Error("DATABASE_URL is required to access a school database.");
   }
 
-  // 創建新的連線池
+  // Configure every connection in the pool, rather than SET on one random client.
+  // schoolSchemaName accepts only known, validated identifier characters.
   const pool = new Pool({
-    connectionString: process.env.DATABASE_URL
+    connectionString: process.env.DATABASE_URL,
+    options: schoolConnectionOptions(schemaName),
   });
+  const schoolDb = drizzle({ client: pool, schema });
 
-  const db = drizzle({ client: pool, schema });
-
-  // 設定 search_path 到指定的 schema
   try {
-    // 先檢查 schema 是否存在，如果不存在則自動創建
-    await ensureSchemaExists(db, schoolCode);
-
-    // sql.identifier() quotes the schema name; combined with the strict
-    // whitelist in assertSchoolCode this removes the schema-name SQL
-    // injection risk that previously lived in sql.raw template literals.
-    await db.execute(sql`SET search_path TO ${sql.identifier(schemaName)}, public;`);
-    console.log(`✅ Set search_path to ${schemaName}`);
-
-    // 在部署環境中額外確保連接
-    const isDeployment = process.env.REPLIT_DEPLOYMENT === '1';
-    if (isDeployment) {
-      console.log(`🚀 Running in deployment mode for ${schemaName}`);
-    } else {
-      console.log(`🛠️ Running in development mode for ${schemaName}`);
-    }
-  } catch (error) {
-    console.error(`❌ Failed to set search_path for ${schemaName}:`, error);
-
-    // 提供更詳細的錯誤信息
-    const isDeployment = process.env.REPLIT_DEPLOYMENT === '1';
-    if (isDeployment) {
-      console.error('🚨 部署環境資料庫錯誤 - 請檢查 DATABASE_URL 環境變數是否正確設置');
-      console.error('💡 提示：部署環境需要獨立的資料庫配置');
-    }
-
-    throw new Error(`Database connection failed for school ${schoolCode}. Please check database configuration.`);
-  }
-
-  schemaPools.set(cacheKey, db);
-
-  return db;
-}
-
-/**
- * 確保學校 schema 存在，如果不存在則自動創建
- */
-async function ensureSchemaExists(db: any, schoolCode: string) {
-  const schemaName = schoolSchemaName(schoolCode);
-  try {
-    // information_schema query: schema_name is a regular value column,
-    // so it's bound as a parameter — no identifier interpolation needed.
-    const result = await db.execute(sql`
+    const result = await schoolDb.execute(sql`
       SELECT schema_name FROM information_schema.schemata
       WHERE schema_name = ${schemaName}
     `);
-
     if (result.rows.length === 0) {
-      console.log(`🔧 Schema ${schemaName} 不存在，自動創建中...`);
-      await initializeSchoolSchema(schoolCode);
-    } else {
-      console.log(`✅ Schema ${schemaName} 已存在`);
+      throw new SchoolDatabaseError(
+        "SCHOOL_SCHEMA_MISSING",
+        `School schema ${schemaName} is missing; an operator must initialize it through explicit maintenance.`,
+      );
     }
   } catch (error) {
-    console.log(`⚠️ Schema 檢查失敗，嘗試創建: ${error}`);
-    // 如果檢查失敗，嘗試創建 schema
-    try {
-      await initializeSchoolSchema(schoolCode);
-    } catch (initError) {
-      console.error(`❌ 無法創建 schema ${schemaName}:`, initError);
-      throw initError;
-    }
+    await pool.end().catch(() => {});
+    if (error instanceof SchoolDatabaseError) throw error;
+    throw new SchoolDatabaseError(
+      "SCHOOL_SCHEMA_CHECK_FAILED",
+      `Cannot verify school schema ${schemaName}; no automatic repair was attempted.`,
+      error,
+    );
   }
+
+  schemaPools.set(schoolCode, schoolDb);
+  return schoolDb;
 }
 
 /**
@@ -207,6 +180,10 @@ export async function initializeSchoolSchema(schoolCode: string) {
     await mainDb.execute(sql`
       ALTER TABLE ${schemaIdent}.schedules ADD COLUMN IF NOT EXISTS is_class_locked BOOLEAN NOT NULL DEFAULT false;
     `);
+    // Shares the main schedules table definition, which now has a version (#8).
+    await mainDb.execute(sql`
+      ALTER TABLE ${schemaIdent}.schedules ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+    `);
 
     // 創建 teachers 表
     await mainDb.execute(sql`
@@ -223,6 +200,7 @@ export async function initializeSchoolSchema(schoolCode: string) {
       CREATE TABLE IF NOT EXISTS ${schemaIdent}.teacher_feedbacks (
         id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
         schedule_id VARCHAR NOT NULL,
+        teacher_id VARCHAR,
         teacher_name VARCHAR NOT NULL,
         status VARCHAR NOT NULL,
         reschedule_date DATE,
@@ -232,6 +210,22 @@ export async function initializeSchoolSchema(schoolCode: string) {
         FOREIGN KEY (schedule_id) REFERENCES ${schemaIdent}.schedules(id) ON DELETE CASCADE,
         UNIQUE (schedule_id, teacher_name)
       );
+    `);
+    await mainDb.execute(sql`
+      ALTER TABLE ${schemaIdent}.teacher_feedbacks
+      ADD COLUMN IF NOT EXISTS teacher_id VARCHAR;
+    `);
+    await mainDb.execute(sql`
+      UPDATE ${schemaIdent}.teacher_feedbacks feedback
+      SET teacher_id = teacher.id
+      FROM ${schemaIdent}.teachers teacher
+      WHERE feedback.teacher_id IS NULL
+        AND feedback.teacher_name = teacher.teacher_name;
+    `);
+    await mainDb.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS teacher_feedbacks_schedule_teacher_id_unique
+      ON ${schemaIdent}.teacher_feedbacks (schedule_id, teacher_id)
+      WHERE teacher_id IS NOT NULL;
     `);
 
     // 為示範學校添加課表資料（只在demo時執行）
@@ -333,6 +327,17 @@ export function getAvailableSchools(): string[] {
   // 這裡可以從配置文件或環境變數中讀取
   // 暫時回傳示例學校列表
   return ['demo', 'school1', 'school2'];
+}
+
+const SCHOOL_NAMES: Record<string, string> = {
+  demo: "新北高中",
+  school1: "學校一",
+  school2: "學校二",
+};
+
+export function getSchoolPublicInfo(schoolCode: string): { code: string; name: string } {
+  assertSchoolCode(schoolCode);
+  return { code: schoolCode, name: SCHOOL_NAMES[schoolCode] ?? schoolCode };
 }
 
 /**

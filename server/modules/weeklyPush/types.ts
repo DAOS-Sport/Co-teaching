@@ -9,16 +9,22 @@
 
 export type WeeklyPushType = "weekly";
 export type WeeklyPushTriggerSource = "cron" | "manual" | "retry";
-export type WeeklyPushRunStatus =
+export type WeeklyPushRunStatus = "unknown"
   | "queued"
-  | "running"
+  | "preparing"
+  | "sending"
+  | "reconciling"
   | "success"
-  | "partial_failed"
-  | "failed";
-export type WeeklyPushRecipientStatus =
-  | "pending"
-  | "success"
+  | "partial_success"
   | "failed"
+  | "cancelled";
+export type WeeklyPushRecipientStatus = "processing" | "accepted" | "unknown"
+  | "pending"
+  | "sending"
+  | "success"
+  | "retry_wait"
+  | "failed"
+  | "cancelled"
   | "skipped";
 
 /** Job payload for the weekly-push orchestrator queue. */

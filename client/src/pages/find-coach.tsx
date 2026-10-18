@@ -10,7 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
 import { format, addDays, startOfWeek } from "date-fns";
 import { zhTW } from "date-fns/locale";
-import type { Venue, TimeSlot, Schedule } from "@shared/schema";
+import type { VenueDto as Venue, TimeSlotDto as TimeSlot, ScheduleDto as Schedule } from "@shared/contracts";
 import { getExtendedWeekDays, getExtendedWeekEnd } from "@/utils/special-workdays";
 
 interface ScheduleWithRegistrations extends Schedule {
@@ -287,7 +287,7 @@ export default function FindCoach() {
                 <i className="fas fa-chevron-left text-xs sm:text-sm"></i>
               </Button>
               <h2 className="text-sm sm:text-lg font-semibold text-center flex-1 sm:flex-none" data-testid="text-current-week">
-                {format(currentWeek, 'yyyy年M月d日', { locale: zhTW })} - {format(addDays(currentWeek, 4), 'M月d日', { locale: zhTW })}
+                {format(currentWeek, 'yyyy年M月d日', { locale: zhTW })} - {format(addDays(currentWeek, 6), 'M月d日', { locale: zhTW })}
               </h2>
               <Button
                 variant="ghost"

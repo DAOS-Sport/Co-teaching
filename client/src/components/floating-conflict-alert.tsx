@@ -12,9 +12,10 @@ const COLLAPSED_KEY = "conflict_alert_collapsed";
 const POSITION_KEY = "conflict_alert_position";
 
 export default function FloatingConflictAlert({ weekStart }: FloatingConflictAlertProps) {
+  // Starts as the small red dot unless the user opened it before.
   const [isCollapsed, setIsCollapsed] = useState(() => {
     const saved = localStorage.getItem(COLLAPSED_KEY);
-    return saved === "true";
+    return saved !== "false";
   });
   
   const [position, setPosition] = useState(() => {
@@ -34,7 +35,7 @@ export default function FloatingConflictAlert({ weekStart }: FloatingConflictAle
     return null;
   }
   
-  const weekDays = Array.from({ length: 5 }, (_, i) => addDays(weekStart, i));
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
   
   const conflictQueries = useQueries({
     queries: weekDays.map(day => ({
@@ -49,7 +50,7 @@ export default function FloatingConflictAlert({ weekStart }: FloatingConflictAle
   const allConflicts = conflictQueries.flatMap((query, dayIndex) => 
     ((query.data as { coachName: string; timeSlotId: string; venues: string[] }[]) || []).map(conflict => ({
       ...conflict,
-      dayName: ['星期一', '星期二', '星期三', '星期四', '星期五'][dayIndex],
+      dayName: ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'][dayIndex],
       date: format(weekDays[dayIndex], 'M月d日')
     }))
   );
@@ -149,7 +150,7 @@ export default function FloatingConflictAlert({ weekStart }: FloatingConflictAle
               <h3 className="text-base font-medium text-foreground">本週臨時異動</h3>
             </div>
 
-            <div className="pr-8">
+            <div className="pr-8 max-h-[50vh] overflow-y-auto">
               <ul className="text-sm text-destructive space-y-2">
                 {allConflicts.map((conflict, index) => (
                   <li 

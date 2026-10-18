@@ -7,7 +7,6 @@
  *   2. Nulls out `weekly_push_runs.report_path` so the download
  *      endpoint correctly returns 404 instead of an error.
  */
-import cron from "node-cron";
 import { weeklyPushRepo } from "./weeklyPush.repository";
 import { deleteReport } from "../../infra/files/reportStorage";
 
@@ -50,18 +49,11 @@ export async function cleanupOldReports(): Promise<void> {
   console.log(
     `[cleanup] Done. deleted=${deleted} alreadyGone=${alreadyGone} failed=${failed} total=${oldRuns.length}`,
   );
+
+  if (failed > 0) throw new Error("weekly_push_report_cleanup_failed");
 }
 
-export function setupReportCleanupCron(): void {
-  cron.schedule(
-    "30 3 * * *",
-    () => {
-      console.log("[cleanup] Cron triggered: 03:30 Asia/Taipei");
-      cleanupOldReports().catch((err) =>
-        console.error("[cleanup] Report cleanup cron unhandled rejection:", err),
-      );
-    },
-    { timezone: "Asia/Taipei" },
-  );
-  console.log("[cleanup] Report cleanup cron scheduled (03:30 Asia/Taipei)");
+export async function setupReportCleanupCron() {
+  const { configureNotificationSchedules } = await import("../../infra/queue/runtime");
+  return configureNotificationSchedules({ enabled: true, kinds: ["cleanup"] });
 }

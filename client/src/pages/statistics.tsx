@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import AdminLayout from "@/components/admin-layout";
+import { statisticsPeriod } from "@shared/scheduleRules";
 
 const VENUE_COLORS: Record<string, string> = {
   blue: "#3b82f6",
@@ -28,12 +29,11 @@ function StatisticsContent() {
   const getStatisticsPeriod = (baseDate: Date) => {
     const year = baseDate.getFullYear();
     const month = baseDate.getMonth();
-    const startDate = new Date(year, month, 14);
-    const endDate = new Date(year, month + 1, 15);
+    const { start: startDate, end: endDate } = statisticsPeriod(year, month);
     return {
       startDate: format(startDate, "yyyy-MM-dd"),
       endDate: format(endDate, "yyyy-MM-dd"),
-      label: `${format(startDate, "yyyy年M月", { locale: zhTW })} (14日-${format(endDate, "M月15日", { locale: zhTW })})`,
+      label: `${format(startDate, "yyyy年M月", { locale: zhTW })} (16日-${format(endDate, "M月15日", { locale: zhTW })})`,
     };
   };
 
@@ -67,6 +67,10 @@ function StatisticsContent() {
   }, [statistics]);
 
   const totalClasses = useMemo(() => filteredStatistics.reduce((sum, s) => sum + s.totalClasses, 0), [filteredStatistics]);
+  const { data: periodSchedules = [] } = useQuery<{ id: string; className: string | null }[]>({
+    queryKey: [`/api/schedules?startDate=${currentPeriod.startDate}&endDate=${currentPeriod.endDate}`],
+  });
+  const courseSessions = periodSchedules.filter((schedule) => !!schedule.className?.trim()).length;
 
   const getVenueBg = (color: string) => VENUE_COLORS[color] || "#6b7280";
 
@@ -100,7 +104,7 @@ function StatisticsContent() {
         <div className="bg-card rounded-lg shadow-sm border border-border p-6">
           {/* Controls */}
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-6 gap-4">
-            <h2 className="text-base sm:text-lg font-semibold">堂數統計</h2>
+            <div><h2 className="text-base sm:text-lg font-semibold">排定堂數統計</h2><p className="text-xs text-muted-foreground">依已排入課表的資料計算，不代表實際出勤或薪資認列。</p></div>
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 w-full sm:w-auto">
               <div className="flex items-center gap-2 w-full sm:w-auto">
                 <Button variant="ghost" size="sm" className="h-8 w-8 p-0"
@@ -134,14 +138,18 @@ function StatisticsContent() {
 
           {/* Summary cards */}
           {filteredStatistics.length > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-center">
                 <div className="text-2xl font-bold text-blue-600">{filteredStatistics.length}</div>
                 <div className="text-xs text-blue-600">教練人數</div>
               </div>
               <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
                 <div className="text-2xl font-bold text-green-600">{totalClasses}</div>
-                <div className="text-xs text-green-600">總堂數</div>
+                <div className="text-xs text-green-600">教練出勤堂數</div>
+              </div>
+              <div className="bg-cyan-50 border border-cyan-200 rounded-lg p-3 text-center">
+                <div className="text-2xl font-bold text-cyan-600">{courseSessions}</div>
+                <div className="text-xs text-cyan-600">課程場次</div>
               </div>
               <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 text-center">
                 <div className="text-2xl font-bold text-purple-600">{allVenues.length}</div>
@@ -166,7 +174,7 @@ function StatisticsContent() {
                   <tr className="bg-muted">
                     <th className="text-center p-3 text-sm font-medium text-muted-foreground w-12">#</th>
                     <th className="text-left p-3 text-sm font-medium text-muted-foreground">教練姓名</th>
-                    <th className="text-center p-3 text-sm font-medium text-muted-foreground w-20">總堂數</th>
+                    <th className="text-center p-3 text-sm font-medium text-muted-foreground w-20">出勤堂數</th>
                     <th className="text-center p-3 text-sm font-medium text-muted-foreground w-20">當班</th>
                     <th className="text-center p-3 text-sm font-medium text-muted-foreground w-20">偕同</th>
                     <th className="text-left p-3 text-sm font-medium text-muted-foreground">各場館分布</th>

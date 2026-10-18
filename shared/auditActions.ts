@@ -1,0 +1,101 @@
+/**
+ * Operation-audit vocabulary (#3), shared by the server that records the rows
+ * and the IT page that shows them, so every recorded action has a label and
+ * every entity falls under one of the page's filters.
+ */
+export const AUDIT_ACTION_LABELS = {
+  "schedule.create": "新增課程",
+  "schedule.update": "修改課程",
+  "schedule.patch": "修改教練人數",
+  "schedule.assign": "指派教練",
+  "schedule.delete": "刪除課程",
+  "schedule.bulk_delete": "批次刪除課程",
+  "schedule.lock": "鎖定課表",
+  "schedule.unlock": "解鎖課表",
+  "schedule.copy_week": "複製整週",
+  "schedule.import": "匯入課表",
+  "venue.create": "新增場館",
+  "venue.delete": "刪除場館",
+  "venue_info.update": "修改場館資訊",
+  "availability.save": "儲存可排時段",
+  "availability.venues": "設定可排場館",
+  "coach.status": "審核教練帳號",
+  "coach.rename": "修改教練姓名",
+  "coach.line_bind": "綁定 LINE",
+  "coach.line_clear": "解除 LINE",
+  "coach.register": "教練申請帳號",
+  "coach.link": "教練綁定帳號",
+  "coach_rules.update": "修改教練守則",
+  "notify.daily": "發送明日提醒",
+  "notify.fill_reminder": "提醒填寫時段",
+  "notify.individual": "個別推播",
+  "ragic.sync": "手動 Ragic 同步",
+  "weekly_push.enqueue": "排入週推播",
+  "weekly_push.cancel": "取消週推播",
+  "weekly_push.reconcile": "對帳週推播",
+  "weekly_push.retry": "重試週推播",
+} as const;
+
+export type AuditAction = keyof typeof AUDIT_ACTION_LABELS;
+
+/** Entity → IT page activity filter. */
+export const AUDIT_ENTITY_GROUPS = {
+  schedule: "schedule",
+  schedule_week: "schedule",
+  schedule_import: "schedule",
+  venue: "venue",
+  venue_info: "venue",
+  coach_availability: "availability",
+  coach_user: "coach",
+  coach_rules: "coach",
+  notification: "trigger",
+  ragic_sync: "trigger",
+  weekly_push: "trigger",
+} as const;
+
+export type AuditEntity = keyof typeof AUDIT_ENTITY_GROUPS;
+
+/** Labels for the before/after keys the activity list shows. */
+export const AUDIT_FIELD_LABELS: Record<string, string> = {
+  className: "班名",
+  coachName: "教練1",
+  coachName2: "教練2",
+  coachCount: "教練人數",
+  coach1IsTeaching: "教練1授課",
+  coach2IsTeaching: "教練2授課",
+  isClassLocked: "鎖定",
+  date: "日期",
+  notes: "備註",
+  name: "名稱",
+  color: "顏色",
+  status: "狀態",
+  linkedCoachName: "排課名稱",
+  lineId: "LINE",
+  phone: "電話",
+  email: "Email",
+  mapUrl: "地圖",
+  videoUrl: "影片",
+  description: "說明",
+  content: "內容",
+  venueName: "場館",
+  venues: "可排場館",
+  startDate: "起",
+  endDate: "迄",
+  locked: "鎖定",
+  sourceWeek: "來源週",
+  targetWeek: "目標週",
+  copied: "複製筆數",
+  created: "新增筆數",
+  updated: "更新筆數",
+  deleted: "刪除筆數",
+  weekStart: "週",
+  slots: "可排時段數",
+  added: "新增時段",
+  removed: "移除時段",
+  mode: "方式",
+  sent: "成功",
+  failed: "失敗",
+  result: "結果",
+  runId: "推播批次",
+  recipients: "收件人數",
+};

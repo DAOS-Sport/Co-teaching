@@ -4,3 +4,13 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
+# Kept out of the public GitHub repo: personal data, internal docs, local handoffs
+exports/
+COACH_LOGIN_TEMPLATE.md
+docs/api-manual.md
+docs/claude-mcp.md
+docs/grok-scheduling-mcp.md
+.agents/
+attached_assets/internal-api_*
+.handoffs/
+v16-review/

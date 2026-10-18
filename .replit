@@ -6,13 +6,25 @@ hidden = [".config", ".git", "generated-icon.png", "node_modules", "dist"]
 channel = "stable-24_05"
 
 [deployment]
-deploymentTarget = "vm"
+deploymentTarget = "cloudrun"
 build = ["npm", "run", "build"]
-run = ["npm", "run", "start"]
+run = ["npm", "run", "start:autoscale"]
 
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[[ports]]
+localPort = 5001
+externalPort = 3001
+
+[[ports]]
+localPort = 5010
+externalPort = 3000
+
+[[ports]]
+localPort = 5011
+externalPort = 3002
 
 [env]
 PORT = "5000"
@@ -48,3 +60,6 @@ timeoutMs = 20000
 [userenv]
 
 [userenv.shared]
+
+[objectStorage]
+defaultBucketID = "replit-objstore-2969f48e-3695-4269-a0b2-73660457aa49"

@@ -1,9 +1,10 @@
+import { isPlaceholderCoach } from "@shared/scheduleRules";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequestWithConfirm } from "@/lib/queryClient";
 import CoachAutocomplete from "./coach-autocomplete";
-import type { Venue, TimeSlot, Schedule } from "@shared/schema";
+import type { VenueDto as Venue, TimeSlotDto as TimeSlot, ScheduleDto as Schedule } from "@shared/contracts";
 
 interface ScheduleGridProps {
   date: string;
@@ -34,7 +35,7 @@ export default function ScheduleGrid({ date }: ScheduleGridProps) {
       className: string;
       coachName: string;
     }) => {
-      const response = await apiRequest('POST', '/api/schedules', scheduleData);
+      const response = await apiRequestWithConfirm('POST', '/api/schedules', scheduleData);
       return response.json();
     },
     onSuccess: () => {
@@ -129,7 +130,7 @@ export default function ScheduleGrid({ date }: ScheduleGridProps) {
                 return (
                   <td
                     key={cellKey}
-                    className="schedule-cell p-2 border border-border hover:bg-accent/50 cursor-pointer relative"
+                    className={`schedule-cell p-2 border cursor-pointer relative ${schedules?.some(s => s.venueId === venue.id && s.timeSlotId === timeSlot.id && (isPlaceholderCoach(s.coachName) || isPlaceholderCoach(s.coachName2))) ? "bg-red-200 border-red-600 text-red-950 hover:bg-red-300" : "border-border hover:bg-accent/50"}`}
                     data-testid={`cell-${venue.name}-${timeSlot.period}`}
                   >
                     <input

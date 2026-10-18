@@ -6,7 +6,8 @@
  * its venue-shaped methods here.
  */
 import { eq } from "drizzle-orm";
-import { db } from "../db";
+// #3: follows the caller's transaction (see shared/dbContext).
+import { txDb as db } from "../shared/dbContext";
 import {
   venues,
   timeSlots,

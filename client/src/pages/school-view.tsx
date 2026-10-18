@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, MapPin, Video, ExternalLink } from "lucide-react";
 import { format, addWeeks, subWeeks, startOfWeek, addDays } from "date-fns";
 import { zhTW } from "date-fns/locale";
-import type { Venue, TimeSlot, Schedule, VenueInfo } from "@shared/schema";
+import type { VenueDto as Venue, TimeSlotDto as TimeSlot, ScheduleDto as Schedule, VenueInfoDto as VenueInfo } from "@shared/contracts";
 import { getExtendedWeekDays, getExtendedWeekdayNames, getExtendedWeekEnd } from "@/utils/special-workdays";
 
 export default function SchoolView() {
@@ -179,7 +179,7 @@ export default function SchoolView() {
           </Button>
 
           <div className="text-sm font-semibold text-center whitespace-nowrap min-w-[220px]">
-            {format(currentWeek, "yyyy年MM月dd日", { locale: zhTW })} - {format(addDays(currentWeek, 4), "MM月dd日", { locale: zhTW })}
+            {format(currentWeek, "yyyy年MM月dd日", { locale: zhTW })} - {format(addDays(currentWeek, 6), "MM月dd日", { locale: zhTW })}
           </div>
 
           <Button
